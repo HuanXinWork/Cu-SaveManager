@@ -15,8 +15,8 @@ namespace CasualtiesUnknown.SaveManager
     public class UpdateChecker : MonoBehaviour
     {
         private const string PluginGuid = "com.casualtiesUnknown.saveManager";
-        private const string ApiUrl = "https://api.github.com/repos/huanxin996/Cu-SaveManager/releases/latest";
-        private const string ReleasesUrl = "https://github.com/huanxin996/Cu-SaveManager/releases";
+        private const string ApiUrl = "https://api.github.com/repos/HuanXinWork/Cu-SaveManager/releases/latest";
+        private const string ReleasesUrl = "https://github.com/HuanXinWork/Cu-SaveManager/releases";
         private const int UpdateNoticeSlot = 1;
         private const string MainMenuScene = "PreGen";
 

@@ -14,7 +14,7 @@ Multiplayer is tested on the host side and works.
 
 ## Changelog
 
-Full release history lives in [changes.en.md](changes.en.md) (中文：[changes.md](changes.md)). Builds are published at [Releases](https://github.com/huanxin996/Cu-SaveManager/releases).
+Full release history lives in [changes.en.md](changes.en.md) (中文：[changes.md](changes.md)). Builds are published at [Releases](https://github.com/HuanXinWork/Cu-SaveManager/releases).
 
 ## How to use
 
@@ -68,6 +68,6 @@ Once enabled under Settings → Auto Rollback on Death, dying starts a countdown
 
 ## Related
 
-- [CasualtiesUnknown-SkinEditor](https://github.com/huanxin996/CasualtiesUnknown-SkinEditor): live preview and animation preview.
-- [huanxin996/Cu-Hotbar](https://github.com/huanxin996/Cu-Hotbar): customizable hotbar with item swapping and quick-use.
-- [huanxin996/Cu-Stats](https://github.com/huanxin996/Cu-Stats): block / item / combat / movement / kill statistics panel.
+- [CasualtiesUnknown-SkinEditor](https://github.com/HuanXinWork/CasualtiesUnknown-SkinEditor): live preview and animation preview.
+- [HuanXinWork/Cu-Hotbar](https://github.com/HuanXinWork/Cu-Hotbar): customizable hotbar with item swapping and quick-use.
+- [HuanXinWork/Cu-Stats](https://github.com/HuanXinWork/Cu-Stats): block / item / combat / movement / kill statistics panel.
