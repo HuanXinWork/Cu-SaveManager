@@ -9,8 +9,8 @@ namespace CasualtiesUnknown.SaveManager
 {
     /// <summary>
     /// 多人回档位置写回：对齐单机 SelfSpawnPatcher（FinishWorldGeneration Postfix 最后写回）。
-    /// 不用 Krok OnWorldgenFinish 事件（会拖垮 Krok 协程）；改 Harmony Postfix，在世界生成完成后
-    /// 经 MpRollbackRunner 等待 Util.IsWorldGenerated 再写回玩家位置（PlaceBody 由 KrokMP 自身守卫）。
+    /// 不订阅联机模组的世界生成完成事件（会拖长其协程）；改挂 WorldGeneration.FinishWorldGeneration 的 Harmony Postfix，
+    /// 再经 MpRollbackRunner 等到 CasualtiesTogetherUtils.Util.IsWorldGenerated() 为真后才写回玩家位置。
     /// </summary>
     internal static class MpPositionRestorer
     {
@@ -97,7 +97,7 @@ namespace CasualtiesUnknown.SaveManager
             }
             var runner = MpRollbackRunner.Instance;
             if (runner != null)
-                runner.RunApplyRetries(TryApplyOnce, EndSession);
+                runner.RunOnceAfterWorldGenerated(TryApplyOnce, EndSession);
             else
                 EndSession();
         }
@@ -151,20 +151,7 @@ namespace CasualtiesUnknown.SaveManager
             {
                 if (!File.Exists(rulesPath)) return result;
                 string json = File.ReadAllText(rulesPath);
-                int idx = json.IndexOf("\"PLRPOS\"", StringComparison.Ordinal);
-                if (idx < 0) return result;
-                int brace = json.IndexOf('{', idx);
-                if (brace < 0) return result;
-                int depth = 0, end = brace;
-                for (int i = brace; i < json.Length; i++)
-                {
-                    if (json[i] == '{') depth++;
-                    else if (json[i] == '}')
-                    {
-                        depth--;
-                        if (depth == 0) { end = i; break; }
-                    }
-                }
+                if (!MpRulesJson.TryFindPlrPosBlock(json, out int brace, out int end)) return result;
                 string block = json.Substring(brace + 1, end - brace - 1);
                 int p = 0;
                 while (p < block.Length)

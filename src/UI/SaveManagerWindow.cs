@@ -380,8 +380,7 @@ namespace CasualtiesUnknown.SaveManager
 
             GUILayout.EndVertical();
 
-            if (QolBridge.IsQolPresent()
-                || (MultiplayerBridge.IsModPresent() && MultiplayerBridge.IsMultiplayerEnabled()))
+            if (QolBridge.IsQolPresent() || MultiplayerBridge.IsMultiplayerEnabled())
             {
                 GUILayout.Space(12f);
                 GUILayout.Label(I18n.T("sec.world"), BlackWhiteSkin.HeaderStyle);
@@ -454,7 +453,7 @@ namespace CasualtiesUnknown.SaveManager
             GUILayout.Space(16f);
             GUILayout.Label(I18n.T("about.sec_deps"), CenterTitleStyle, GUILayout.ExpandWidth(true));
             GUILayout.Space(6f);
-            DrawLinkButton("KrokoshaCasualtiesMP", "https://github.com/Krokosha666/cas-unk-krokosha-multiplayer-coop");
+            DrawLinkButton("Casualties: Together", "https://www.nexusmods.com/scavprototype/mods/67");
             DrawLinkButton("BepInEx", "https://github.com/BepInEx/BepInEx");
             DrawLinkButton("QoL Unknown", "https://github.com/jimmyking9999999/QoL-Unknown");
 
@@ -761,11 +760,11 @@ namespace CasualtiesUnknown.SaveManager
 
         // —— 控件 helpers —— //
 
-        /// <summary>固定世界：QoL / KrokMP / 本 mod 三选一（按 mod 安装情况显示按钮）+ 种子 + 位置。</summary>
+        /// <summary>固定世界：QoL / 联机模组 / 本 mod 三选一（按 mod 安装情况显示按钮）+ 种子 + 位置。</summary>
         private void DrawWorldGroup()
         {
             bool qolPresent = QolBridge.IsQolPresent();
-            bool krokPresent = MultiplayerBridge.IsModPresent() && MultiplayerBridge.IsMultiplayerEnabled();
+            bool krokPresent = MultiplayerBridge.IsMultiplayerEnabled();
             string engine = WorldEngineArbiter.NormalizeEngineName(_cfg.PreferredEngine.Value);
 
             GUILayout.BeginHorizontal();

@@ -2,6 +2,20 @@
 
 > English changelog: see [changes.en.md](changes.en.md)
 
+## 1.3.0
+
+适配游戏正式版 1.0 与 Together 5.4.0。
+
+联机桥从 KrokMP 迁移到 Together Interop 契约层：会话、通道、名册、类型注册全部走反射契约，不再直接引用联机模组程序集。
+
+多人存档判定改按「联机会话是否运行中」：Together 只在 `Net.IsRunning` 时把游戏存档目录切到 `mp_save`。原判定按「联机模组已加载」，装了 Together 但单机游玩时会误判为多人会话，打包 `mp_save` 时找不到目录。
+
+固定世界种子注入改挂 `Together.LastBeforeGenerationState` 构造，种子广播接管 `ServerMain.Server_AnnounceSeed`，回档位置写回改为等世界生成完成。
+
+声明对 QoL Unknown 的软依赖，避免加载顺序导致首次启动时 QoL 成员全部解析失败。
+
+新增 Debug 构建专用日志，Release 产物不含调试字符串。
+
 ## 1.2.1
 
 兼容 Dedicated Server：回档时跳过 sidecar 主机坐标写回（专服没有本地玩家）。

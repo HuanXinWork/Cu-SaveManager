@@ -1,14 +1,41 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 
 namespace CasualtiesUnknown.SaveManager
 {
+    /// <summary>槽位记录的玩家身份：持久 ID、玩家名与 Steam ID。</summary>
+    /// <remarks>
+    /// 联机模组按持久 ID 建 mp_save/&lt;persistentId&gt;/save.sv 目录与 mp_rules.json 里 PLRPOS 的键，
+    /// 而持久 ID 随传输方式（Steam / 直连）与玩家名变化。回档时靠玩家名与 Steam ID 把旧持久 ID 认回同一个人。
+    /// </remarks>
+    internal readonly struct SlotMpPlayer
+    {
+        /// <summary>用身份数据构造记录；名称或 Steam ID 未知时分别传空字符串与 0。</summary>
+        internal SlotMpPlayer(string persistentId, string name, ulong steamId)
+        {
+            PersistentId = persistentId ?? "";
+            Name = name ?? "";
+            SteamId = steamId;
+        }
+
+        /// <summary>保存时的持久 ID（mp_save 子目录名 / PLRPOS 键）。</summary>
+        internal string PersistentId { get; }
+
+        /// <summary>保存时的玩家名；未知时为空字符串。</summary>
+        internal string Name { get; }
+
+        /// <summary>保存时的 Steam ID；未知（直连或旧槽位）时为 0。</summary>
+        internal ulong SteamId { get; }
+    }
+
     /// <summary>
     /// 槽位伴生元数据，落到 &lt;slot&gt;.sv.json：
     /// { "nickname":"…", "pinned":false, "isAuto":true, "biome":3, "runId":12345, "lastPlayedAtUnixMs":… }
     /// 缺失字段走默认值；序列化与解析手写完成。
     /// runId 取自 save.sv 内的 cId 字段；旧版字段名 "seed" 仍可读取。
+    /// 多人槽位额外记录存档内各玩家的持久 ID / 玩家名 / Steam ID（mpPlayerIds / mpPlayerNames / mpPlayerSteamIds，按索引对齐）。
     /// </summary>
     internal sealed class SlotSidecar
     {
@@ -31,7 +58,7 @@ namespace CasualtiesUnknown.SaveManager
 
         // —— 固定世界 / 位置模式 ——
         //    WorldEngine: "qol" | "self"，标识该存档世界由哪套引擎生成，两套不可互转。
-        //    MpWorldEngine: "krok" | "self"，多人存档的世界/位置由 KrokMP 或本 mod 种子注入。
+        //    MpWorldEngine: "krok" | "self"，多人存档的世界/位置由 Together 或本 mod 种子注入。
         //    PosMode: "lastPos"（回保存时坐标）| "fixedPos"（回 FixedX/FixedY）。
         internal string WorldEngine { get; set; } = "";
         internal string MpWorldEngine { get; set; } = "";
@@ -42,6 +69,10 @@ namespace CasualtiesUnknown.SaveManager
 
         /// <summary>本层激活的 LayerModifier 索引；-2=未记录（旧档/游戏未加载，回档时交给游戏自滚），-1=本层无词条，>=0=对应 modifierIndex。读档时由 ApplyLayerModifiersRestorePatch 还原。</summary>
         internal int ActiveLayerModifierIndex { get; set; } = -2;
+
+        /// <summary>保存时存档内各玩家的身份（持久 ID / 玩家名 / Steam ID）；非多人槽或旧槽位为空列表。</summary>
+        /// <remarks>回档时由 <see cref="MpPersistentIdMapper"/> 用来把旧持久 ID 映射到当前会话的持久 ID。</remarks>
+        internal List<SlotMpPlayer> MpPlayers { get; set; } = new List<SlotMpPlayer>();
 
         /// <summary>
         /// 从指定路径加载.json元数据；若文件不存在或解析失败，返回空实例。
@@ -109,7 +140,12 @@ namespace CasualtiesUnknown.SaveManager
             sb.Append("\"fixedX\":").Append(FixedX.ToString("R", System.Globalization.CultureInfo.InvariantCulture)).Append(',');
             sb.Append("\"fixedY\":").Append(FixedY.ToString("R", System.Globalization.CultureInfo.InvariantCulture)).Append(',');
             sb.Append("\"isMultiplayer\":").Append(IsMultiplayer ? "true" : "false").Append(',');
-            sb.Append("\"activeLayerModifierIndex\":").Append(ActiveLayerModifierIndex.ToString());
+            sb.Append("\"activeLayerModifierIndex\":").Append(ActiveLayerModifierIndex.ToString()).Append(',');
+            sb.Append("\"mpPlayerIds\":").Append(StringArray(MpPlayers, p => p.PersistentId)).Append(',');
+            sb.Append("\"mpPlayerNames\":").Append(StringArray(MpPlayers, p => p.Name)).Append(',');
+            sb.Append("\"mpPlayerSteamIds\":").Append(StringArray(MpPlayers, p => p.SteamId == 0UL
+                ? ""
+                : p.SteamId.ToString(System.Globalization.CultureInfo.InvariantCulture)));
             sb.Append('}');
             return sb.ToString();
         }
@@ -141,7 +177,64 @@ namespace CasualtiesUnknown.SaveManager
             int idx = ReadInt(text, "activeLayerModifierIndex");
             // 老 sidecar 没这字段：ReadInt 返 0；用 FindKey 区分"无字段"（-2 未记录）vs"显式值"
             s.ActiveLayerModifierIndex = FindKey(text, "activeLayerModifierIndex") < 0 ? -2 : idx;
+            s.MpPlayers = ReadMpPlayers(text);
             return s;
+        }
+
+        /// <summary>按 mpPlayerIds / mpPlayerNames / mpPlayerSteamIds 三个平行数组重建玩家身份列表；缺字段或对不齐时按可用部分尽力拼装。</summary>
+        private static List<SlotMpPlayer> ReadMpPlayers(string text)
+        {
+            var result = new List<SlotMpPlayer>();
+            var ids = ReadStringArray(text, "mpPlayerIds");
+            if (ids.Count == 0) return result;
+            var names = ReadStringArray(text, "mpPlayerNames");
+            var steamIds = ReadStringArray(text, "mpPlayerSteamIds");
+            for (int i = 0; i < ids.Count; i++)
+            {
+                if (string.IsNullOrEmpty(ids[i])) continue;
+                ulong steamId = 0UL;
+                if (i < steamIds.Count) ulong.TryParse(steamIds[i], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out steamId);
+                result.Add(new SlotMpPlayer(ids[i], i < names.Count ? names[i] : "", steamId));
+            }
+            return result;
+        }
+
+        /// <summary>把玩家身份列表按字段序列化成 JSON 字符串数组。</summary>
+        private static string StringArray(List<SlotMpPlayer> players, Func<SlotMpPlayer, string> selector)
+        {
+            if (players == null || players.Count == 0) return "[]";
+            var sb = new StringBuilder(players.Count * 24 + 2);
+            sb.Append('[');
+            for (int i = 0; i < players.Count; i++)
+            {
+                if (i > 0) sb.Append(',');
+                sb.Append(EscapeJsonString(selector(players[i])));
+            }
+            sb.Append(']');
+            return sb.ToString();
+        }
+
+        /// <summary>读取 JSON 字符串数组；字段缺失、不是数组或解析中断时返回已读到的部分。</summary>
+        private static List<string> ReadStringArray(string text, string key)
+        {
+            var result = new List<string>();
+            int p = FindKey(text, key);
+            if (p < 0 || p >= text.Length || text[p] != '[') return result;
+            p++;
+            while (p < text.Length)
+            {
+                char c = text[p];
+                if (c == ']') break;
+                if (c == '"')
+                {
+                    string item = ReadQuotedAt(text, ref p);
+                    if (item == null) break;
+                    result.Add(item);
+                    continue;
+                }
+                p++;
+            }
+            return result;
         }
 
         private static string EscapeJsonString(string raw)
@@ -184,13 +277,24 @@ namespace CasualtiesUnknown.SaveManager
         private static string ReadString(string text, string key)
         {
             int p = FindKey(text, key);
-            if (p < 0 || p >= text.Length || text[p] != '"') return null;
+            if (p < 0) return null;
+            return ReadQuotedAt(text, ref p);
+        }
+
+        /// <summary>从 <paramref name="position"/> 处的开引号读一个 JSON 字符串，读完把位置推到闭合引号之后；起始不是引号时返回 null。</summary>
+        private static string ReadQuotedAt(string text, ref int position)
+        {
+            if (position < 0 || position >= text.Length || text[position] != '"') return null;
             var sb = new StringBuilder();
-            p++;
+            int p = position + 1;
             while (p < text.Length)
             {
                 char c = text[p++];
-                if (c == '"') return sb.ToString();
+                if (c == '"')
+                {
+                    position = p;
+                    return sb.ToString();
+                }
                 if (c == '\\' && p < text.Length)
                 {
                     char n = text[p++];
@@ -201,12 +305,22 @@ namespace CasualtiesUnknown.SaveManager
                         case 'n': sb.Append('\n'); break;
                         case 'r': sb.Append('\r'); break;
                         case 't': sb.Append('\t'); break;
+                        case 'u':
+                            if (p + 4 <= text.Length
+                                && int.TryParse(text.Substring(p, 4), System.Globalization.NumberStyles.HexNumber,
+                                    System.Globalization.CultureInfo.InvariantCulture, out int code))
+                            {
+                                sb.Append((char)code);
+                                p += 4;
+                            }
+                            break;
                         default: sb.Append(n); break;
                     }
                     continue;
                 }
                 sb.Append(c);
             }
+            position = p;
             return sb.ToString();
         }
 

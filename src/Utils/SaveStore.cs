@@ -49,7 +49,7 @@ namespace CasualtiesUnknown.SaveManager
             bool mpModPresent = MultiplayerBridge.IsModPresent();
             bool mpSave = MpSaveLocator.HasMpSave();
             string vanilla = MpSaveLocator.VanillaSavePath;
-            string mode = mpEnabled ? I18n.T("mode.multiplayer") : I18n.T("mode.singleplayer");
+            string mode = mpRunning ? I18n.T("mode.multiplayer") : I18n.T("mode.singleplayer");
             string chosen = MpSaveLocator.IsMultiplayerSaveActive() ? MpSaveLocator.MpSaveDir : vanilla;
             return I18n.F("fmt.save_path_diag", mode, chosen, mpSave, File.Exists(vanilla))
                 + $" [modPresent={mpModPresent} enabled={mpEnabled} running={mpRunning}]";
@@ -119,11 +119,54 @@ namespace CasualtiesUnknown.SaveManager
             }
             // 用 sidecar.LastPlayedAtUnixMs（保存时刻）排序，比 File.LastWriteTimeUtc 稳定——
             // 后者会在迁移 / 复制时被改写，导致排序错乱。
-            return result
+            var ordered = result
                 .OrderByDescending(s => s.Sidecar.LastPlayedAtUnixMs)
                 .ThenByDescending(s => s.File.LastWriteTimeUtc)
                 .ToList();
+#if DEBUG
+            LogScanDebug(ordered);
+#endif
+            return ordered;
         }
+
+#if DEBUG
+        // ListSlots 会被 UI 逐帧调用；Debug 详情按扫描结果签名去重，避免逐帧刷屏。
+        private static string _lastScanDebugSignature;
+
+        /// <summary>Debug 构建下输出本次扫描的槽位详情；仅在槽位集合 / 大小 / 修改时间变化时输出。</summary>
+        private static void LogScanDebug(List<SlotInfo> slots)
+        {
+            bool mpRunning = MultiplayerBridge.IsMultiplayerRunning();
+            var signature = new System.Text.StringBuilder();
+            signature.Append(slots.Count).Append('|').Append(mpRunning).Append('|');
+            for (int i = 0; i < slots.Count; i++)
+            {
+                FileInfo file = slots[i].File;
+                signature.Append(file.FullName).Append(':').Append(file.Length).Append(':').Append(file.LastWriteTimeUtc.Ticks).Append(';');
+            }
+
+            string current = signature.ToString();
+            if (string.Equals(current, _lastScanDebugSignature, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _lastScanDebugSignature = current;
+            ModLog.Debug($"槽位扫描：共 {slots.Count} 个槽位 mpRunning={mpRunning} 单机/多人判定依据=sidecar.isMultiplayer（true→多人槽，需多人会话才能回档）");
+            for (int i = 0; i < slots.Count; i++)
+            {
+                SlotInfo slot = slots[i];
+                string sidecarPath = SlotSidecar.SidecarPath(slot.FullSlotPath);
+                bool sidecarExists = File.Exists(sidecarPath);
+                bool sidecarUsable = sidecarExists && !IsEmptySidecar(slot.Sidecar);
+                ModLog.Debug($"槽位扫描 [{i}] {slot.File.Name} size={slot.File.Length}B"
+                    + $" mtime={slot.File.LastWriteTimeUtc:yyyy-MM-dd HH:mm:ss}Z"
+                    + $" sidecar={(sidecarUsable ? "有效" : sidecarExists ? "存在但内容为空" : "缺失")}"
+                    + $" 类型={(slot.Sidecar.IsMultiplayer ? "多人槽" : "单机槽")}(sidecar.isMultiplayer={slot.Sidecar.IsMultiplayer})"
+                    + $" runId={slot.Sidecar.RunId} 目录={slot.RunIdFolder}/{slot.DateFolder} auto={slot.Sidecar.IsAuto} pinned={slot.Sidecar.Pinned}");
+            }
+        }
+#endif
 
         /// <summary>把 fi 收进结果列表；若 sidecar 缺 RunId，则解 .sv 拿 cId 回填，并把文件迁到 slots/&lt;runId&gt;/&lt;dateFolder&gt;/。</summary>
         private void CollectOrMigrate(FileInfo fi, string dateFolder, string topFolder,
@@ -199,6 +242,8 @@ namespace CasualtiesUnknown.SaveManager
             ModLog.Info(DescribeSavePathDecision());
             var sidecar = SlotSidecar.LoadOrEmpty(slotFullPath);
             bool mpRunning = MultiplayerBridge.IsMultiplayerRunning();
+            ModLog.Debug("RestoreSlotToSave：入参 槽=" + Path.GetFileName(slotFullPath) + " backupBefore=" + backupBefore
+                + " 当前mpRunning=" + mpRunning + " sidecar.IsMultiplayer=" + sidecar.IsMultiplayer);
 
             if (sidecar.IsMultiplayer)
             {
@@ -207,7 +252,9 @@ namespace CasualtiesUnknown.SaveManager
                     ModLog.Warning(I18n.T("mp.slot_needs_mp_session"));
                     throw new InvalidOperationException(I18n.T("mp.slot_needs_mp_session"));
                 }
+                ModLog.Debug("RestoreSlotToSave：分支=多人槽（还原 mp_save → 回主菜单 → 两阶段重载）");
                 RestoreMultiplayerSlot(slotFullPath, backupBefore);
+                ModLog.Debug("RestoreSlotToSave：返回（void，多人分支已触发主机重载）");
                 return;
             }
             if (mpRunning)
@@ -223,16 +270,19 @@ namespace CasualtiesUnknown.SaveManager
                 string bakPath = WriteSlotFile(ctx, isAuto: false, prefix: "beforeLoad-");
                 var bak = BuildSidecar(ctx, I18n.T("lbl.before_load_alias"), isAuto: false);
                 bak.Save(bakPath);
+                ModLog.Debug("RestoreSlotToSave：回档前已备份当前 save.sv → " + Path.GetFileName(bakPath));
             }
+            ModLog.Debug("RestoreSlotToSave：分支=单机槽（覆盖 save.sv + 还原世界引擎/位置）");
             File.Copy(slotFullPath, game, overwrite: true);
             NormalizeSaveBiome(game, sidecar.Biome);
             InvalidateRunIdCache();
             // 先 PrepareWorldForSlot：qol 引擎可能补记 sidecar.QolSeed，之后再持久化
             PrepareWorldForSlot(sidecar);
             PersistCurrentSaveSidecar(sidecar);
+            ModLog.Debug("RestoreSlotToSave：返回（void，单机槽已写入 save.sv 并准备世界）");
         }
 
-        /// <summary>多人槽位还原：仅主机可执行——可选备份当前 mp_save，解包目标 zip 回 mp_save，再触发主机重新加载。</summary>
+        /// <summary>多人槽位还原：仅主机可执行——可选备份当前 mp_save，解包目标 zip 到暂存目录、把旧玩家持久 ID 改写成当前会话的，再整体替换 mp_save 并触发主机重新加载。</summary>
         private void RestoreMultiplayerSlot(string slotFullPath, bool backupBefore)
         {
             if (MultiplayerBridge.IsMultiplayerRunning() && !MultiplayerBridge.IsServer())
@@ -240,6 +290,7 @@ namespace CasualtiesUnknown.SaveManager
                 ModLog.Warning(I18n.T("mp.only_host_can_rollback"));
                 throw new InvalidOperationException(I18n.T("mp.only_host_can_rollback"));
             }
+            var sidecar = SlotSidecar.LoadOrEmpty(slotFullPath);
             if (backupBefore)
             {
                 MultiplayerBridge.TrySaveMpGame();
@@ -250,13 +301,21 @@ namespace CasualtiesUnknown.SaveManager
                     BuildSidecar(ctx, I18n.T("lbl.before_load_alias"), isAuto: false).Save(bakPath);
                 }
             }
-            MpSaveLocator.RestoreMpSaveFrom(slotFullPath);
-            var sidecar = SlotSidecar.LoadOrEmpty(slotFullPath);
+            // 解包与 pid 改写都在暂存目录里做，改写在映射对不上时抛异常，此时的 mp_save 保持原样。
+            MpSaveLocator.RestoreMpSaveFrom(slotFullPath,
+                stagedDir => MpPersistentIdMapper.RewriteRestoredSave(stagedDir, slotFullPath, sidecar));
             PrepareWorldForSlot(sidecar);
+            // 槽位里的 mp_rules 带 LEVEL=true + MODIFIER>=0 时，联机模组读档会自己还原层词条；
+            // 再按 sidecar 还原一次会让同一个词条 Initialize 两遍（刷怪 / 生矿类会翻倍）。
+            if (MpRulesJson.WillRestoreLayerModifier(MpSaveLocator.MpRulesPath))
+            {
+                ApplyLayerModifiersRestorePatch.PendingIndex = -2;
+                ModLog.Info("多人回档：本层词条交由联机模组按 mp_rules 的 MODIFIER 还原");
+            }
             WorldEngineArbiter.PrepareMpRollback(sidecar);
             MultiplayerBridge.PrepareMpRollback(sidecar);
             MpPositionRestorer.PrepareForRollback(sidecar);
-            ModLog.Info("多人回档：mp_save 已还原，继续游戏由 KrokMP 原生流程加载");
+            ModLog.Info("多人回档：mp_save 已还原，继续游戏由 Together 原生流程加载");
             MpRollbackController.TriggerHostReload();
         }
 
@@ -280,10 +339,11 @@ namespace CasualtiesUnknown.SaveManager
         private static bool ShouldUseMpSave()
             => MultiplayerBridge.IsMultiplayerRunning() && MpSaveLocator.HasMpSave();
 
-        /// <summary>统一构造 sidecar：填入上下文 + 默认位置模式（lastPos，FixedXY=当前坐标）。</summary>
+        /// <summary>统一构造 sidecar：填入上下文 + 默认位置模式（lastPos，FixedXY=当前坐标）。
+        /// 多人槽额外记下存档内各玩家的持久 ID / 玩家名 / Steam ID，供回档时把旧 pid 换成本场会话的 pid。</summary>
         private static SlotSidecar BuildSidecar(GameContext ctx, string nickname, bool isAuto)
         {
-            return new SlotSidecar
+            var sidecar = new SlotSidecar
             {
                 Nickname = nickname ?? "",
                 Pinned = false,
@@ -303,6 +363,8 @@ namespace CasualtiesUnknown.SaveManager
                 IsMultiplayer = ShouldUseMpSave(),
                 ActiveLayerModifierIndex = ctx.ActiveLayerModifierIndex,
             };
+            if (sidecar.IsMultiplayer) MpPersistentIdMapper.CaptureForSlot(sidecar);
+            return sidecar;
         }
 
         /// <summary>读档/回档前按 sidecar 选定的世界引擎准备世界还原：self 由本模组写回位置，qol 交给 QoL。</summary>
@@ -322,6 +384,7 @@ namespace CasualtiesUnknown.SaveManager
             }
             bool wantSelf = eff == "self";
             ModLog.Info($"回档引擎={eff} (sidecar.WorldEngine='{sidecar.WorldEngine}')");
+            ModLog.Debug("回档种子来源=" + DescribeRestoreSeedSource(sidecar, eff));
 
             if (wantSelf)
             {
@@ -359,6 +422,26 @@ namespace CasualtiesUnknown.SaveManager
                 WorldEngineArbiter.Apply(WorldEngine.Qol, sidecar.QolSeed, sidecar.QolSeedInput);
                 QolBridge.PrepareRollback(sidecar);
             }
+        }
+
+        /// <summary>Debug 构建下说明回档种子取自哪里（sidecar / 存档文件 FNV / 无），与上面的补记顺序一致；Release 中调用点被整体移除。</summary>
+        private static string DescribeRestoreSeedSource(SlotSidecar sidecar, string eff)
+        {
+            if (sidecar.QolSeed != 0 || !string.IsNullOrEmpty(sidecar.QolSeedInput))
+            {
+                return "sidecar（seed=" + sidecar.QolSeed + " input='" + sidecar.QolSeedInput + "'）";
+            }
+
+            if (eff == "self")
+            {
+                return "无（sidecar 未记录种子；self 引擎按 seed=1 激活，世界与原存档不可复现）";
+            }
+
+            string sv = sidecar.IsMultiplayer ? MpSaveLocator.ResolveLocalPlayerSavePath() : GameSavePath;
+            int fnv = QolBridge.ComputeDeterministicSeedFromSaveFile(sv);
+            return fnv != 0
+                ? "存档文件 FNV（sidecar 未记录种子，按 " + Path.GetFileName(sv) + " 字节 FNV-1a 推导 seed=" + fnv + "）"
+                : "无（sidecar 未记录种子且存档文件不可读，无法推导 FNV）";
         }
 
         /// <summary>主菜单 Continue 前准备当前 save.sv：优先读 companion 元数据，缺失时按当前配置补齐。</summary>
@@ -437,7 +520,7 @@ namespace CasualtiesUnknown.SaveManager
                 string sv = MpSaveLocator.ResolveLocalPlayerSavePath();
                 if (string.IsNullOrEmpty(sv) || !File.Exists(sv))
                 {
-                    ModLog.Info("多人续玩种子持久化跳过：本地玩家 save.sv 暂不存在（KrokMP 未落盘）");
+                    ModLog.Info("多人续玩种子持久化跳过：本地玩家 save.sv 暂不存在（Together 未落盘）");
                     return;
                 }
                 var sc = SlotSidecar.LoadOrEmpty(sv);
@@ -532,6 +615,12 @@ namespace CasualtiesUnknown.SaveManager
         {
             try { if (File.Exists(slotFullPath)) File.Delete(slotFullPath); } catch { }
             SlotSidecar.DeleteFor(slotFullPath);
+            try
+            {
+                string rulesBackup = MpPersistentIdMapper.RulesBackupPath(slotFullPath);
+                if (!string.IsNullOrEmpty(rulesBackup) && File.Exists(rulesBackup)) File.Delete(rulesBackup);
+            }
+            catch { }
         }
 
         internal void UpdateSidecar(string slotFullPath, SlotSidecar sidecar) => sidecar.Save(slotFullPath);
@@ -742,7 +831,7 @@ namespace CasualtiesUnknown.SaveManager
             }
             if (ShouldUseMpSave())
             {
-                // QoL 在场或玩家在层底时不改写 biome；mp_rules 锁定与层深无关，始终执行。
+                // QoL 在场或玩家在层底时不改写 biome；mp_rules.json 的 LEVEL/MODIFIER 一律保持联机模组写入的原值（只记诊断日志）。
                 bool rewriteBiome = !QolBridge.IsQolPresent() && !IsPlayerAtLayerBoundary();
                 MpSaveLayerHelper.NormalizeAfterSnapshot(ctx.Biome, rewriteBiome);
             }

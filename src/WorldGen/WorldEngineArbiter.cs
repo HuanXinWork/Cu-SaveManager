@@ -1,6 +1,6 @@
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>固定世界生成引擎：QoL / KrokMP / 本 mod。</summary>
+    /// <summary>固定世界生成引擎：QoL / 联机模组 / 本 mod。</summary>
     internal enum WorldEngine
     {
         Qol,
@@ -72,7 +72,7 @@ namespace CasualtiesUnknown.SaveManager
                 SeededWorldEngine.Deactivate();
                 QolBridge.DisableQolIntervention();
                 Current = WorldEngine.Krok;
-                ModLog.Info("固定世界引擎=KrokMP（原生世界生成）");
+                ModLog.Info("固定世界引擎=联机模组（原生世界生成）");
                 return;
             }
             if (engine == WorldEngine.Self)
@@ -114,6 +114,51 @@ namespace CasualtiesUnknown.SaveManager
             // self 引擎：Apply 内会先清零 QoL 种子，须在其后再 PrepareRollback 钉入，顺序不可调换。
             Apply(WorldEngine.Self, seed, input);
             QolBridge.PrepareRollback(sidecar);
+        }
+
+        /// <summary>Debug 构建下说明本次世界生成的种子来源与判定依据，避免世界不一致时反复猜引擎；Release 中调用点被整体移除。</summary>
+        internal static string DescribeSeedSource()
+        {
+            if (Current == WorldEngine.Krok)
+            {
+                return "krok（世界随机状态由联机模组主机广播，本模组不注入种子）";
+            }
+
+            if (Current == WorldEngine.Self)
+            {
+                if (!SeededWorldEngine.IsActive)
+                {
+                    return "无（self 引擎未激活，世界按原随机状态生成）";
+                }
+
+                return "self 引擎（seed=" + SeededWorldEngine.CurrentSeed + " input='" + SeededWorldEngine.InputString + "'，" + DescribeSelfSeedBasis() + "）";
+            }
+
+            return "QoL：" + QolBridge.DescribeSeedSource();
+        }
+
+        /// <summary>self 引擎种子的判定依据：与配置手输种子一致 / 与当前 save.sv sidecar 一致 / 都不同。</summary>
+        private static string DescribeSelfSeedBasis()
+        {
+            if (!string.IsNullOrEmpty(ManualSeedInput) && ManualSeedInput == SeededWorldEngine.InputString)
+            {
+                return "取自配置里的手输种子";
+            }
+
+            try
+            {
+                SlotSidecar sidecar = SlotSidecar.LoadOrEmpty(SaveStore.GameSavePath);
+                if (sidecar.QolSeed != 0 && sidecar.QolSeed == SeededWorldEngine.CurrentSeed)
+                {
+                    return "与当前 save.sv sidecar 记录的种子一致，来源于 sidecar";
+                }
+            }
+            catch
+            {
+                // 读 sidecar 失败只影响这条诊断文案，不影响世界生成。
+            }
+
+            return "不等同手输种子也不同于当前 sidecar，按新开局随机种子/多人回放处理";
         }
 
         private static string ResolveSidecarEngine(SlotSidecar sidecar)

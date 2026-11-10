@@ -1,41 +1,31 @@
 using System;
-using System.Reflection;
+using CasualtiesUnknown.SaveManager.Interop;
 using UnityEngine;
 
 namespace CasualtiesUnknown.SaveManager
 {
     /// <summary>
-    /// QoL.Unknown mod 的反射桥接。保存槽位时抓取 QoL 的 SeedManager 状态，
-    /// 回档时把存档里的玩家位置 + 种子推回 QoL，让它在下一次 TryLoadGame postfix 还原。
-    /// QoL 不在场时所有方法静默返回默认值，绝不影响主流程。
+    /// QoL.Unknown 的软依赖桥。目标程序集成员名只出现在 <see cref="QolProvider"/> 里；
+    /// 保存槽位时抓取 QoL 的 SeedManager 状态，回档时把存档里的玩家位置 + 种子推回 QoL，
+    /// 让它在下一次 TryLoadGame postfix 还原。QoL 不在场时所有方法静默返回默认值，绝不影响主流程。
     /// </summary>
     internal static class QolBridge
     {
-        private static bool _resolved;
-
-        private static FieldInfo _fPendingLoadPosition; // QoL_Unknown.SaveSystemPatcher.PendingLoadPosition (Vector3?)
-        private static FieldInfo _fSeedIsSeeded;         // QoL_Unknown.SeedManager.IsSeeded (bool)
-        private static FieldInfo _fSeedCurrentSeed;      // QoL_Unknown.SeedManager.CurrentSeed (int)
-        private static FieldInfo _fSeedInputString;      // QoL_Unknown.SeedManager.InputString (string)
-        private static FieldInfo _fAutosaveEnabled;      // QoL_Unknown.SaveManager.AutosaveEnabled (bool)
-        private static bool _qolPresent;
+        private static QolProvider Provider => InteropBootstrap.Qol;
 
         /// <summary>是否检测到 QoL.Unknown（其世界确定化 / 自动存档能力可用）。</summary>
         internal static bool IsQolPresent()
         {
-            TryResolve();
-            return _qolPresent;
+            return Provider.IsPresent;
         }
 
         /// <summary>暂时禁用 QoL 对世界生成与存档的介入：置 SeedManager.IsSeeded=false + SaveManager.AutosaveEnabled=false。</summary>
         internal static void DisableQolIntervention()
         {
-            TryResolve();
             try
             {
-                _fSeedIsSeeded?.SetValue(null, false);
-                _fSeedCurrentSeed?.SetValue(null, 0);
-                _fAutosaveEnabled?.SetValue(null, false);
+                Provider.TryWriteSeed(false, 0, string.Empty);
+                Provider.TryWriteAutosaveEnabled(false);
             }
             catch (Exception ex)
             {
@@ -47,27 +37,25 @@ namespace CasualtiesUnknown.SaveManager
         /// 已 seeded（玩家在 QoL 输过种子）则不覆盖。让回档可凭 sidecar 种子复现世界。</summary>
         internal static void EnsureQolSeeded()
         {
-            TryResolve();
-            if (!_qolPresent)
+            if (!Provider.IsPresent)
             {
                 ModLog.Warning("EnsureQolSeeded：QoL 未解析到，跳过设种子");
                 return;
             }
+
             try
             {
-                _fAutosaveEnabled?.SetValue(null, true);
-                bool seeded = _fSeedIsSeeded != null && (bool)_fSeedIsSeeded.GetValue(null);
-                int current = _fSeedCurrentSeed != null ? (int)_fSeedCurrentSeed.GetValue(null) : 0;
+                Provider.TryWriteAutosaveEnabled(true);
+                Provider.TryReadSeed(out bool seeded, out int current, out string _);
                 if (seeded && current != 0)
                 {
                     ModLog.Info($"QoL 模式新开局：QoL 已有种子 seed={current}，不覆盖");
                     return;
                 }
+
                 int seed = Guid.NewGuid().GetHashCode();
                 if (seed == 0) seed = 1;
-                _fSeedCurrentSeed?.SetValue(null, seed);
-                _fSeedInputString?.SetValue(null, seed.ToString());
-                _fSeedIsSeeded?.SetValue(null, true);
+                Provider.TryWriteSeed(true, seed, seed.ToString());
                 ModLog.Info($"QoL 模式新开局已设确定种子 seed={seed}（原 seeded={seeded} current={current}）");
             }
             catch (Exception ex)
@@ -76,64 +64,16 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        private static void TryResolve()
-        {
-            if (_resolved) return;
-            try
-            {
-                Type tPatcher = null, tSeed = null, tSaveMgr = null;
-                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-                {
-                    var name = asm.GetName().Name;
-                    if (name.IndexOf("qol", StringComparison.OrdinalIgnoreCase) < 0) continue;
-                    tPatcher = asm.GetType("QoL_Unknown.SaveSystemPatcher");
-                    tSeed = asm.GetType("QoL_Unknown.SeedManager");
-                    tSaveMgr = asm.GetType("QoL_Unknown.SaveManager");
-                    if (tSeed != null) break;
-                }
-                if (tPatcher != null)
-                {
-                    _fPendingLoadPosition = tPatcher.GetField("PendingLoadPosition",
-                        BindingFlags.Public | BindingFlags.Static | BindingFlags.NonPublic);
-                }
-                if (tSeed != null)
-                {
-                    _fSeedIsSeeded = tSeed.GetField("IsSeeded",
-                        BindingFlags.Public | BindingFlags.Static | BindingFlags.NonPublic);
-                    _fSeedCurrentSeed = tSeed.GetField("CurrentSeed",
-                        BindingFlags.Public | BindingFlags.Static | BindingFlags.NonPublic);
-                    _fSeedInputString = tSeed.GetField("InputString",
-                        BindingFlags.Public | BindingFlags.Static | BindingFlags.NonPublic);
-                }
-                if (tSaveMgr != null)
-                {
-                    _fAutosaveEnabled = tSaveMgr.GetField("AutosaveEnabled",
-                        BindingFlags.Public | BindingFlags.Static | BindingFlags.NonPublic);
-                }
-                _qolPresent = tPatcher != null || tSeed != null;
-                if (_qolPresent) _resolved = true;
-                ModLog.Info($"QolBridge resolved: SaveSystemPatcher={(tPatcher != null ? "✓" : "✗")} SeedManager={(tSeed != null ? "✓" : "✗")} SaveManager={(tSaveMgr != null ? "✓" : "✗")}");
-                if (!_qolPresent) ModLog.Info("QoL.Unknown 未检测到，将使用 saveManager 自身固定世界引擎");
-            }
-            catch (Exception ex)
-            {
-                ModLog.Warning($"QolBridge 反射失败：{ex.Message}");
-            }
-        }
-
         /// <summary>读 QoL.SeedManager 当前实时种子；为 0 时回落到本 mod sidecar 已记录的稳定种子。</summary>
         internal static void ReadCurrentSeed(out int seed, out string input)
         {
-            TryResolve();
-            seed = 0;
-            input = "";
-            try
+            Provider.TryReadSeed(out bool _, out seed, out input);
+            if (seed != 0)
             {
-                if (_fSeedCurrentSeed != null) seed = (int)_fSeedCurrentSeed.GetValue(null);
-                if (_fSeedInputString != null) input = (string)_fSeedInputString.GetValue(null) ?? "";
+                return;
             }
-            catch { }
-            if (seed == 0)
+
+            try
             {
                 var sc = SlotSidecar.LoadOrEmpty(SaveStore.GameSavePath);
                 if (sc != null && sc.QolSeed != 0)
@@ -141,6 +81,10 @@ namespace CasualtiesUnknown.SaveManager
                     seed = sc.QolSeed;
                     input = string.IsNullOrEmpty(input) ? (sc.QolSeedInput ?? "") : input;
                 }
+            }
+            catch
+            {
+                // 读取 sidecar 失败时保持 QoL 的实时值，不影响调用方。
             }
         }
 
@@ -164,16 +108,39 @@ namespace CasualtiesUnknown.SaveManager
             catch { return 0; }
         }
 
+        /// <summary>Debug 构建下说明当前种子取自哪里（QoL 实时 / sidecar 回落 / 存档文件 FNV / 无）；Release 中调用点被整体移除。</summary>
+        internal static string DescribeSeedSource()
+        {
+            if (!Provider.IsPresent)
+            {
+                return "QoL 未解析到，无种子来源（世界按原随机状态生成）";
+            }
+
+            Provider.TryReadSeed(out bool seeded, out int seed, out string input);
+            if (seeded && seed != 0)
+            {
+                return "QoL 当前种子（seeded=true seed=" + seed + " input='" + input + "'）";
+            }
+
+            SlotSidecar sidecar = SlotSidecar.LoadOrEmpty(SaveStore.GameSavePath);
+            if (sidecar.QolSeed != 0 || !string.IsNullOrEmpty(sidecar.QolSeedInput))
+            {
+                return "sidecar（QoL 未 seeded 或种子为 0，seed=" + sidecar.QolSeed + " input='" + sidecar.QolSeedInput + "'）";
+            }
+
+            int fnv = ComputeDeterministicSeedFromSaveFile(SaveStore.GameSavePath);
+            return fnv != 0
+                ? "存档文件 FNV（QoL 无种子且 sidecar 未记录，save.sv 字节 FNV-1a seed=" + fnv + "）"
+                : "无（QoL 无种子、sidecar 未记录、save.sv 不可读；世界不可复现）";
+        }
+
         /// <summary>把种子钉进 QoL：CurrentSeed/InputString + IsSeeded=true。QoL 不在场或 seed=0 时静默跳过。</summary>
         internal static void PinSeed(int seed, string input)
         {
-            TryResolve();
-            if (!_qolPresent || seed == 0) return;
+            if (!Provider.IsPresent || seed == 0) return;
             try
             {
-                _fSeedCurrentSeed?.SetValue(null, seed);
-                _fSeedInputString?.SetValue(null, input ?? "");
-                _fSeedIsSeeded?.SetValue(null, true);
+                Provider.TryWriteSeed(true, seed, input);
             }
             catch (Exception ex)
             {
@@ -185,22 +152,16 @@ namespace CasualtiesUnknown.SaveManager
         internal static void PrepareRollback(SlotSidecar sidecar)
         {
             if (sidecar == null) return;
-            TryResolve();
             try
             {
-                if (sidecar.HasPlayerPos && _fPendingLoadPosition != null)
+                if (sidecar.HasPlayerPos)
                 {
-                    Vector3? pos = new Vector3(sidecar.PlayerX, sidecar.PlayerY, 0f);
-                    _fPendingLoadPosition.SetValue(null, pos);
+                    Provider.TryWritePendingLoadPosition(new Vector3(sidecar.PlayerX, sidecar.PlayerY, 0f));
                 }
-                if (_fSeedIsSeeded != null && _fSeedCurrentSeed != null && _fSeedInputString != null)
+
+                if (sidecar.QolSeed != 0 || !string.IsNullOrEmpty(sidecar.QolSeedInput))
                 {
-                    if (sidecar.QolSeed != 0 || !string.IsNullOrEmpty(sidecar.QolSeedInput))
-                    {
-                        _fSeedIsSeeded.SetValue(null, true);
-                        _fSeedCurrentSeed.SetValue(null, sidecar.QolSeed);
-                        _fSeedInputString.SetValue(null, sidecar.QolSeedInput ?? "");
-                    }
+                    Provider.TryWriteSeed(true, sidecar.QolSeed, sidecar.QolSeedInput);
                 }
             }
             catch (Exception ex)

@@ -1,6 +1,7 @@
 using System;
 using BepInEx;
 using BepInEx.Logging;
+using CasualtiesUnknown.SaveManager.Interop;
 using UnityEngine;
 
 namespace CasualtiesUnknown.SaveManager
@@ -10,12 +11,16 @@ namespace CasualtiesUnknown.SaveManager
     /// 处理快捷键分发、定时备份调度。具体能力放在各专职文件里。
     /// </summary>
     [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
-    [BepInDependency("KrokoshaCasualtiesMP", BepInDependency.DependencyFlags.SoftDependency)]
+    [BepInDependency("CasualtiesMP", BepInDependency.DependencyFlags.SoftDependency)]
+    // 声明对 QoL Unknown 的软依赖，让 BepInEx 把它排在本插件之前。
+    // 否则 QoL 排在后面，本插件 Awake 时刻解析不到它的成员，种子/自动备份联动会被降级成自有引擎。
+    [BepInDependency(QolGuid, BepInDependency.DependencyFlags.SoftDependency)]
     public sealed class Plugin : BaseUnityPlugin
     {
         private const string PluginGuid = "com.casualtiesUnknown.saveManager";
+        private const string QolGuid = "org.bepinex.plugins.qol_unknown";
         private const string PluginName = "CuSaveManager";
-        internal const string PluginVersion = "1.2.1";
+        internal const string PluginVersion = "1.3.0";
 
         private static ManualLogSource _log;
         private static Plugin _instance;
@@ -42,6 +47,7 @@ namespace CasualtiesUnknown.SaveManager
             UnityEngine.Object.DontDestroyOnLoad(gameObject);
             _cfg = new HotkeyConfig(Config);
             ModLog.Init(_log);
+            ModLog.Debug("[Build] Debug 构建，详细日志已启用");
             ModLog.ShowInConsole = _cfg.ShowLogInConsole.Value;
             _cfg.ShowLogInConsole.SettingChanged += (_, __) => ModLog.ShowInConsole = _cfg.ShowLogInConsole.Value;
             UpdateChecker.Enabled = _cfg.AcceptUpdateNotice.Value;
@@ -78,11 +84,28 @@ namespace CasualtiesUnknown.SaveManager
             ModLog.Info($"{PluginName} ready · slots→{_store.SlotsRoot} · save.sv={SaveStore.GameSavePath}");
             ModLog.Info(MultiplayerBridge.IsModPresent() ? I18n.T("mp.mod_detected") : I18n.T("mp.mod_not_detected"));
             ModLog.Info(QolBridge.IsQolPresent() ? I18n.T("qol.mod_detected") : I18n.T("qol.mod_not_detected"));
+            LogInteropResolution();
             MpWorldSeedInjector.TryPatch();
             MpSeedBroadcast.TryPatch();
             MpRollbackRunner.Ensure(this);
             MpPositionRestorer.TryPatchHarmony();
             gameObject.AddComponent<UpdateChecker>();
+        }
+
+        /// <summary>把互操作层的成员解析结果写进日志，便于比对目标插件版本变动。</summary>
+        private void LogInteropResolution()
+        {
+            try
+            {
+                InteropBootstrap.Initialize();
+                ModLog.Info("Interop：" + InteropBootstrap.Together.DescribeResolvedMembers());
+                ModLog.Info("Interop：" + InteropBootstrap.Qol.DescribeResolvedMembers());
+                ModLog.Info("Interop：" + InteropBootstrap.LayerUnlock.DescribeResolvedMembers());
+            }
+            catch (Exception ex)
+            {
+                ModLog.Warning($"Interop 自检失败：{ex.Message}");
+            }
         }
 
         private void OnApplicationQuitting()

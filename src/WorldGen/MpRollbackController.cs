@@ -7,7 +7,7 @@ namespace CasualtiesUnknown.SaveManager
     /// <summary>
     /// 多人回档两阶段触发：仅主机可用。
     /// 阶段一（游戏内）：mp_save 已被还原后，调 PlayerCamera.ToMainMenu 让全员回主菜单并置待回档标志。
-    /// 阶段二（回到主菜单）：PreRunScript.Start 后反射调用 KrokMP LoadVanillaGeneratedWorld(loadsave:true)，走联机 mod 原生继续游戏读档。
+    /// 阶段二（回到主菜单）：PreRunScript.Start 后调 Together.WorldMP.LoadVanillaGeneratedWorld(true) 走联机模组原生继续游戏读档。
     /// </summary>
     internal static class MpRollbackController
     {
@@ -21,6 +21,7 @@ namespace CasualtiesUnknown.SaveManager
         {
             _pendingHostReload = true;
             ModLog.Info(I18n.T("mp.rollback_returning_menu"));
+            ModLog.Debug("多人回档两阶段重载：阶段一（置待回档标志=true，mp_save 已还原，让主机 ToMainMenu 回主菜单）");
             ReturningToMenu = true;
             try
             {
@@ -38,11 +39,12 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        /// <summary>阶段二：主菜单 PreRunScript 就绪后调用。待回档且为主机时反射走 KrokMP 继续游戏。</summary>
+        /// <summary>阶段二：主菜单 PreRunScript 就绪后调用。待回档且为主机时走联机模组的继续游戏。</summary>
         internal static void OnPreRunReady()
         {
             if (!_pendingHostReload) return;
             _pendingHostReload = false;
+            ModLog.Debug("多人回档两阶段重载：阶段二（主菜单 PreRunScript 就绪）isServer=" + MultiplayerBridge.IsServer());
             if (!MultiplayerBridge.IsServer())
             {
                 ModLog.Warning("待多人回档但当前非主机，已取消");
@@ -51,8 +53,10 @@ namespace CasualtiesUnknown.SaveManager
             try
             {
                 ModLog.Info(I18n.T("mp.rollback_reloading"));
-                if (!MultiplayerBridge.TryLoadMultiplayerContinue())
-                    ModLog.Warning("多人回档：KrokMP 继续游戏调用失败");
+                bool continued = MultiplayerBridge.TryLoadMultiplayerContinue();
+                ModLog.Debug("多人回档两阶段重载：阶段二继续游戏调用结果=" + continued);
+                if (!continued)
+                    ModLog.Warning("多人回档：联机模组继续游戏调用失败");
             }
             catch (Exception ex)
             {

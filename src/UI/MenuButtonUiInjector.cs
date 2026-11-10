@@ -8,7 +8,7 @@ using UnityEngine.UI;
 namespace CasualtiesUnknown.SaveManager
 {
     /// <summary>
-    /// 主菜单"存档管理"按钮加载逻辑——仿 KrokoshaCasualtiesMP 多人模组：
+    /// 主菜单"存档管理"按钮加载逻辑（与联机模组的主菜单按钮同一套做法）：
     /// 不用 IMGUI，而是 Harmony patch <see cref="PreRunScript.Start"/> 的 Postfix；
     /// 克隆原版 loadButton 的 GameObject，挂到 prerun.transform 下成为真子物体。
     /// 生命周期：PreRunScript 销毁时按钮自动一起销毁；scene 重载会再次走 Start，再次注入。
@@ -30,15 +30,31 @@ namespace CasualtiesUnknown.SaveManager
             {
                 _harmony = new Harmony("com.casualtiesUnknown.saveManager.menuButton");
                 _harmony.PatchAll(typeof(MenuButtonUiInjector).Assembly);
-                SeededWorldPatcher.TryPatch(_harmony);
-                KrokLoadRunReplacer.TryPatch(_harmony);
             }
             catch (Exception ex)
             {
                 ModLog.Warning($"Harmony PatchAll 失败：{ex.Message}");
             }
 
-            // KrokoshaCasualtiesMP 同时 patch PreRunScript.Start 与 sceneLoaded，
+            try
+            {
+                SeededWorldPatcher.TryPatch(_harmony);
+            }
+            catch (Exception ex)
+            {
+                ModLog.Warning($"SeededWorldPatcher.TryPatch 失败：{ex.Message}");
+            }
+
+            try
+            {
+                LoadRunPrefixReplacer.TryPatch(_harmony);
+            }
+            catch (Exception ex)
+            {
+                ModLog.Warning($"LoadRunPrefixReplacer.TryPatch 失败：{ex.Message}");
+            }
+
+            // 联机模组同时 patch PreRunScript.Start 与 sceneLoaded，
             // 这里订阅 sceneLoaded 是兜底，保证场景重载时仍能注入。
             SceneManager.sceneLoaded += OnSceneLoaded;
         }
@@ -67,7 +83,9 @@ namespace CasualtiesUnknown.SaveManager
         {
             try
             {
-                KrokLoadRunReplacer.TryPatch(_harmony);
+                // 回到主菜单时重试：世界生成层首次挂载如有目标缺失，这里补齐（已挂载的目标会去重）。
+                SeededWorldPatcher.TryPatch(_harmony);
+                LoadRunPrefixReplacer.TryPatch(_harmony);
                 InjectOnce(pre);
             }
             catch (Exception ex)

@@ -1,16 +1,22 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using CasualtiesUnknown.SaveManager.Interop;
 using HarmonyLib;
 using UnityEngine;
 
 namespace CasualtiesUnknown.SaveManager
 {
     /// <summary>
-    /// 让 LayerUnlock 解锁层的协程生成内容随种子复现：对其 4 个协程状态机的 MoveNext 挂 prefix/postfix，
+    /// 让 LayerUnlock 解锁层的协程生成内容随种子复现：对其协程状态机的 MoveNext 挂 prefix/postfix，
     /// 给每个协程实例一条私有确定 RNG 流（首次进入按 种子+层深+协程盐 InitState，其后跨 yield 保存/还原），
     /// 并在每步前后隔离/还原全局 Random.state。LayerUnlock 不在场或世界未确定化时不介入。
     /// </summary>
+    /// <remarks>
+    /// 状态机类型与 MoveNext 一律取自 <see cref="InteropBootstrap.LayerUnlock"/>（<see cref="LayerUnlockProvider.MoveNextMethods"/>），
+    /// 本类不再维护状态机类型名，也不再自行探测程序集。
+    /// </remarks>
     internal static class LayerUnlockSeedPatcher
     {
         private static bool _patched;
@@ -27,7 +33,7 @@ namespace CasualtiesUnknown.SaveManager
         private static readonly ConditionalWeakTable<object, CoState> _table =
             new ConditionalWeakTable<object, CoState>();
 
-        // 协程类型名 -> 盐（避免不同协程用同一序列；与 SeededWorldPatcher 的阶段偏移区间错开）。
+        /// <summary>协程类型名 -> 盐（避免不同协程用同一序列；与 SeededWorldPatcher 的阶段偏移区间错开）。</summary>
         private static int SaltFor(Type declaringType)
         {
             string n = declaringType != null ? declaringType.Name : "";
@@ -38,71 +44,48 @@ namespace CasualtiesUnknown.SaveManager
             return 70000;
         }
 
-        // LayerUnlock 协程状态机的嵌套类型全名。
-        private static readonly string[] StateMachineTypes =
-        {
-            "RemiyamuremodLayerUnlock.TerrainPatch+<GenerateStructuresAfterTerrain>d__2",
-            "RemiyamuremodLayerUnlock.StructuresPatch+<AddStructuresForDepth>d__1",
-            "RemiyamuremodLayerUnlock.EntitiesPatch+<SpawnIonHeaters>d__3",
-            "RemiyamuremodLayerUnlock.EntitiesPatch+<SpawnSpaceHeaters>d__4",
-        };
-
         internal static void TryPatch()
         {
-            if (_patched) return;
+            if (_patched)
+            {
+                return;
+            }
+
             try
             {
-                Type probe = AccessTools.TypeByName("RemiyamuremodLayerUnlock.TerrainPatch");
-                if (probe == null) return; // LayerUnlock 不在场，跳过。
-                _patched = true;
-
-                var harmony = new Harmony("com.casualtiesUnknown.saveManager.layerUnlockSeed");
-                var self = typeof(LayerUnlockSeedPatcher);
-                var pre = new HarmonyMethod(self.GetMethod(nameof(MoveNext_Prefix),
-                    BindingFlags.Static | BindingFlags.NonPublic));
-                var post = new HarmonyMethod(self.GetMethod(nameof(MoveNext_Postfix),
-                    BindingFlags.Static | BindingFlags.NonPublic));
-
-                int count = 0;
-                foreach (string typeName in StateMachineTypes)
+                LayerUnlockProvider provider = InteropBootstrap.LayerUnlock;
+                if (!provider.IsPresent)
                 {
-                    Type sm = ResolveType(typeName);
-                    if (sm == null) { ModLog.Warning($"LayerUnlock 状态机未找到：{typeName}"); continue; }
-                    MethodInfo mn = FindMoveNext(sm);
-                    if (mn == null) { ModLog.Warning($"LayerUnlock MoveNext 未找到：{typeName}"); continue; }
-                    harmony.Patch(mn, pre, post);
-                    count++;
+                    // LayerUnlock 不在场：不置 _patched，留待世界生成时重试。
+                    return;
                 }
-                ModLog.Info($"LayerUnlock 确定化已挂载（{count}/{StateMachineTypes.Length} 个协程，仅确定化世界下生效）");
+
+                IReadOnlyList<MethodInfo> moveNextMethods = provider.MoveNextMethods;
+                if (moveNextMethods.Count == 0)
+                {
+                    // 提供方会自行记录缺失的状态机；没有可挂载目标时保持未挂载以便重试。
+                    return;
+                }
+
+                Harmony harmony = new Harmony("com.casualtiesUnknown.saveManager.layerUnlockSeed");
+                Type self = typeof(LayerUnlockSeedPatcher);
+                HarmonyMethod prefix = new HarmonyMethod(self.GetMethod(nameof(MoveNext_Prefix),
+                    BindingFlags.Static | BindingFlags.NonPublic));
+                HarmonyMethod postfix = new HarmonyMethod(self.GetMethod(nameof(MoveNext_Postfix),
+                    BindingFlags.Static | BindingFlags.NonPublic));
+
+                for (int i = 0; i < moveNextMethods.Count; i++)
+                {
+                    harmony.Patch(moveNextMethods[i], prefix, postfix);
+                }
+
+                _patched = true;
+                ModLog.Info($"LayerUnlock 确定化已挂载（{moveNextMethods.Count} 个协程，仅确定化世界下生效）");
             }
             catch (Exception ex)
             {
                 ModLog.Warning($"LayerUnlockSeedPatcher.TryPatch 失败：{ex.Message}");
             }
-        }
-
-        private static Type ResolveType(string fullNestedName)
-        {
-            var t = AccessTools.TypeByName(fullNestedName);
-            if (t != null) return t;
-            // 退路：在 LayerUnlock 程序集里按嵌套结构解析。
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                if (asm.GetName().Name.IndexOf("LayerUnlock", StringComparison.OrdinalIgnoreCase) < 0) continue;
-                t = asm.GetType(fullNestedName);
-                if (t != null) return t;
-            }
-            return null;
-        }
-
-        private static MethodInfo FindMoveNext(Type smType)
-        {
-            foreach (var m in smType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
-            {
-                if (m.ReturnType != typeof(bool) || m.GetParameters().Length != 0) continue;
-                if (m.Name == "MoveNext" || m.Name.EndsWith(".MoveNext", StringComparison.Ordinal)) return m;
-            }
-            return null;
         }
 
         private static void MoveNext_Prefix(object __instance, MethodBase __originalMethod,

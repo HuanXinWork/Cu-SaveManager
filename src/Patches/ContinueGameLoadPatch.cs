@@ -4,7 +4,7 @@ using HarmonyLib;
 namespace CasualtiesUnknown.SaveManager
 {
     /// <summary>
-    /// 单机 Continue：LoadRun 前准备 sidecar。多人 LoadRun 由 KrokLoadRunReplacer 接管。
+    /// 单机 Continue：LoadRun 前准备 sidecar。多人 LoadRun 由 LoadRunPrefixReplacer 接管。
     /// </summary>
     [HarmonyPatch(typeof(PreRunScript), "LoadRun")]
     [HarmonyPriority(Priority.First)]
@@ -15,7 +15,7 @@ namespace CasualtiesUnknown.SaveManager
             try
             {
                 if (MultiplayerBridge.IsMultiplayerEnabled()) return;
-                if (SaveStore.IsMultiplayerContextActive() || MultiplayerBridge.IsMultiplayerRunning()) return;
+                if (MultiplayerBridge.IsMultiplayerRunning()) return;
                 if (!SaveStore.CurrentSaveExists()) return;
                 new SaveStore().PrepareCurrentSaveForContinue();
             }

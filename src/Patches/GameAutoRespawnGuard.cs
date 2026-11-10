@@ -9,7 +9,8 @@ namespace CasualtiesUnknown.SaveManager
     /// 也会触发 RegenerateWorld。
     /// 用 IsActiveGlobal || IsDeathSuspected 双判：从死亡判到的第一帧就拦截，比倒计时启动早。
     /// </summary>
-    [HarmonyPatch(typeof(WorldGeneration), "RegenerateWorld")]
+    // 显式签名：WorldGeneration.RegenerateWorld(bool twice = false)，避免按名称解析时的重载二义性。
+    [HarmonyPatch(typeof(WorldGeneration), "RegenerateWorld", new[] { typeof(bool) })]
     internal static class WorldGenerationRegenerateWorldGuard
     {
         private static bool Prefix()

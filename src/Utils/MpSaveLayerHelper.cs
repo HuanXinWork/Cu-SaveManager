@@ -4,8 +4,9 @@ using System.IO;
 namespace CasualtiesUnknown.SaveManager
 {
     /// <summary>
-    /// 多人存档层数处理：KrokMP 按玩家子目录存 save.sv，且 GenerateWorld 在 TryLoadGame 之前捕获 totalTraveled。
-    /// 须从磁盘 save.sv 读层信息（对齐单机 NormalizeSaveBiome 思路），并修正 mp_rules 避免进下一层 modifier。
+    /// 多人存档层数处理：Together 按玩家子目录存 save.sv，且 GenerateWorld 在 TryLoadGame 之前捕获 totalTraveled。
+    /// 须从磁盘 save.sv 读层信息（对齐单机 NormalizeSaveBiome 思路）。
+    /// mp_rules.json 的 LEVEL / MODIFIER 由联机模组按存档时刻的层内状态写入，本类只输出诊断日志，不改写。
     /// </summary>
     internal static class MpSaveLayerHelper
     {
@@ -31,8 +32,8 @@ namespace CasualtiesUnknown.SaveManager
             return v;
         }
 
-        /// <summary>SaveGame 后规范化 mp_save 内各玩家 save.sv 的 biome，并锁定 mp_rules 为当前层（非进层过渡）。
-        /// rewriteBiome=false 时不改写 biome。mp_rules 锁定与层深无关，始终执行。</summary>
+        /// <summary>SaveGame 后规范化 mp_save 内各玩家 save.sv 的 biome，并输出 mp_rules.json 的层状态诊断。
+        /// rewriteBiome=false 时不改写 biome。mp_rules.json 一律不改写。</summary>
         internal static void NormalizeAfterSnapshot(int biomeDepth, bool rewriteBiome)
         {
             if (!MpSaveLocator.HasMpSave()) return;
@@ -51,7 +52,7 @@ namespace CasualtiesUnknown.SaveManager
                     string rootSv = Path.Combine(MpSaveLocator.MpSaveDir, "save.sv");
                     if (File.Exists(rootSv)) NormalizeSaveBiomeField(rootSv, biomeDepth);
                 }
-                FixMpRulesForCurrentLayer();
+                ReportMpRules("保存快照");
             }
             catch (Exception ex)
             {
@@ -59,22 +60,16 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        private static void FixMpRulesForCurrentLayer()
+        /// <summary>输出 mp_rules.json 的 LEVEL / MODIFIER / PLRPOS 诊断行，不改写文件。</summary>
+        /// <remarks>
+        /// 旧版曾无条件改写为 LEVEL=true、MODIFIER=-1：LEVEL 被强制 true 会把地表存档当层内存档，
+        /// MODIFIER 被强制 -1 则让层内回档永久丢掉本层词条（联机模组读档时按 MODIFIER 还原 LayerModifier）。
+        /// 因此这里只记原值，供排查时对照。
+        /// </remarks>
+        /// <param name="stage">调用时机描述，写进日志</param>
+        private static void ReportMpRules(string stage)
         {
-            string rules = MpSaveLocator.MpRulesPath;
-            if (!File.Exists(rules)) return;
-            try
-            {
-                string json = File.ReadAllText(rules);
-                json = ReplaceJsonBool(json, "LEVEL", true);
-                json = ReplaceJsonInt(json, "MODIFIER", -1);
-                File.WriteAllText(rules, json);
-                ModLog.Info("mp_rules 已锁定为当前层（LEVEL=true MODIFIER=-1）");
-            }
-            catch (Exception ex)
-            {
-                ModLog.Warning($"FixMpRulesForCurrentLayer 失败：{ex.Message}");
-            }
+            ModLog.Info($"mp_rules 原值（{stage}）：{MpRulesJson.Describe(MpSaveLocator.MpRulesPath)}；本 mod 不改写 LEVEL/MODIFIER");
         }
 
         internal static void NormalizeSaveBiomeField(string fullPath, int biomeDepth)
@@ -123,21 +118,6 @@ namespace CasualtiesUnknown.SaveManager
             while (end < json.Length && (char.IsDigit(json[end]) || json[end] == '.' || json[end] == 'e' || json[end] == 'E' || json[end] == '+' || json[end] == '-')) end++;
             if (end <= start) return json;
             return json.Substring(0, start) + value.ToString() + json.Substring(end);
-        }
-
-        private static string ReplaceJsonBool(string json, string field, bool value)
-        {
-            string key = "\"" + field + "\"";
-            int idx = json.IndexOf(key, StringComparison.Ordinal);
-            if (idx < 0) return json;
-            int colon = json.IndexOf(':', idx + key.Length);
-            if (colon < 0) return json;
-            int start = colon + 1;
-            while (start < json.Length && char.IsWhiteSpace(json[start])) start++;
-            int end = start;
-            while (end < json.Length && char.IsLetter(json[end])) end++;
-            if (end <= start) return json;
-            return json.Substring(0, start) + (value ? "true" : "false") + json.Substring(end);
         }
     }
 }

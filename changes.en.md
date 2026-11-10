@@ -2,6 +2,20 @@
 
 > 中文更新日志：见 [changes.md](changes.md)
 
+## 1.3.0
+
+Adapted to the 1.0 release build of the game and Together 5.4.0.
+
+Multiplayer bridge migrated from KrokMP to the Together Interop contract layer: session, channel, roster and type registry all go through reflection contracts, with no compile-time reference to the multiplayer mod assembly.
+
+Multiplayer save detection now keys off "a session is running": Together only switches the game save directory to `mp_save` while `Net.IsRunning`. The old check keyed off "the multiplayer mod is loaded", so single-player sessions with Together installed were misdetected as multiplayer and failed to pack a directory that does not exist.
+
+Fixed-world seed injection now hooks the `Together.LastBeforeGenerationState` constructor, seed broadcast takes over `ServerMain.Server_AnnounceSeed`, and rollback position write-back waits for world generation to finish.
+
+Declared a soft dependency on QoL Unknown so load order can no longer make every QoL member miss on the first launch.
+
+Added Debug-only logging; release builds contain no debug strings.
+
 ## 1.2.1
 
 Dedicated Server compatible: host coordinates from the sidecar are skipped on rollback (a dedicated server has no local player).

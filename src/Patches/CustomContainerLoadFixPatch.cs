@@ -32,7 +32,8 @@ namespace CasualtiesUnknown.SaveManager
     /// 此时容器还是模板预制体（smallpack）的默认小容量，CanHoldItem 失败导致内容物静默掉落/丢失。
     /// 在读档窗口内、LoadItem 之前先通过 CUCoreLib 把自定义容器属性应用到位。软依赖：CUCoreLib 不在则跳过。
     /// </summary>
-    [HarmonyPatch(typeof(Container), "LoadItem")]
+    // 显式签名：Container.LoadItem(Item)，避免按名称解析时的重载二义性。
+    [HarmonyPatch(typeof(Container), "LoadItem", new[] { typeof(Item) })]
     internal static class CustomContainerLoadFixPatch
     {
         private static readonly HashSet<int> _applied = new HashSet<int>();

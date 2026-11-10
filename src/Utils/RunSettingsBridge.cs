@@ -9,7 +9,7 @@ namespace CasualtiesUnknown.SaveManager
 {
     /// <summary>
     /// 游戏难度（RunSettings）反射桥接。难度存于 save.sv 的 runSettings 字段：
-    /// 单机由游戏 TryLoadGame 自动恢复；多人由 KrokMP 接管加载且不恢复，故回档后从本地 save.sv 解析并写回 WorldGeneration.runSettings。
+    /// 单机由游戏 TryLoadGame 自动恢复；多人由 Together 接管加载且不恢复，故回档后从本地 save.sv 解析并写回 WorldGeneration.runSettings。
     /// 类型转换复用游戏 SaveSystem.TupleListToDic（按 RunSetting 类型分别 float/bool/int 解析）。
     /// </summary>
     internal static class RunSettingsBridge

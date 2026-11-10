@@ -110,7 +110,7 @@ namespace CasualtiesUnknown.SaveManager
         /// <summary>
         /// 判定是否处于死亡过渡帧。
         /// 单机：读 <see cref="PlayerCameraDeathDetector.LocalDeathLatched"/>。
-        /// 多人 host：节流到 500ms 一次反射 KrokMP DeadPlayerCount。
+        /// 多人 host：节流到 500ms 一次反射 Together DeadPlayerCount。
         /// </summary>
         private bool IsDying()
         {
@@ -239,16 +239,17 @@ namespace CasualtiesUnknown.SaveManager
                 BroadcastLocal(I18n.T("msg.rollback_loading"));
                 TryBroadcastMP(I18n.T("msg.rollback_loading"));
 
-                if (MultiplayerBridge.IsMultiplayerRunning() && _target.Sidecar.IsMultiplayer)
+                // 多人槽位走 mp_save 还原 + 主机两阶段重载（内部已含场景切换），单机槽位由本类随后切场景。
+                bool multiplayerSlot = _target.Sidecar.IsMultiplayer;
+                ModLog.Debug("执行回档：槽=" + _target.File.Name + " 分支=" + (multiplayerSlot
+                    ? "多人槽（还原 mp_save → 回主菜单 → 两阶段重载）"
+                    : "单机槽（覆盖 save.sv → LoadScene(SampleScene)）") + " backupBefore=false");
+                // 回档入口唯一：存档覆盖 / mp_save 还原 / 世界引擎与位置准备 / sidecar 持久化全部由 RestoreSlotToSave 完成。
+                _store.RestoreSlotToSave(_target.FullSlotPath, backupBefore: false);
+                if (!multiplayerSlot)
                 {
-                    // 多人：还原 mp_save + 主机两阶段重载（自带场景切换）
-                    _store.RestoreSlotToSave(_target.FullSlotPath, backupBefore: false);
-                }
-                else
-                {
-                    File.Copy(_target.FullSlotPath, SaveStore.GameSavePath, overwrite: true);
+                    ModLog.Debug("执行回档：单机槽，置 SaveSystem.loadedRun=true 后 LoadScene(SampleScene)");
                     SaveSystem.loadedRun = true;
-                    _store.PrepareWorldForSlot(_target.Sidecar);
                     StartLoadSampleScene();
                 }
             }
