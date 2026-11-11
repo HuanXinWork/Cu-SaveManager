@@ -18,7 +18,7 @@ namespace CasualtiesUnknown.SaveManager
     /// 接管后的路径：
     ///   · LoadRun 且联机运行中：客户端写状态日志并拦下；服务端还原本地玩家 sidecar 与固定世界种子后调
     ///     Together.WorldMP.LoadVanillaGeneratedWorld(true)。
-    ///   · LoadRun 且联机未开：有存档同上走继续游戏，无存档写状态日志并拦下。
+    ///   · LoadRun 且联机未开：有存档同上走继续游戏（世界由 ContinueGameLoadPatch 按单机 save.sv 准备），无存档拦下。
     ///   · StartRun 且联机运行中：客户端拦下；服务端调 Together.SavesystemPatch.DeleteMPSave() 清旧 mp_save 后调
     ///     Together.WorldMP.LoadVanillaGeneratedWorld(false)。
     ///   · StartRun 且联机未开：放行原版单机新局。
@@ -27,8 +27,7 @@ namespace CasualtiesUnknown.SaveManager
     internal static class LoadRunPrefixReplacer
     {
         private const string ClientCannotStartMessage = "You can't start the game, server can.";
-        private const string SingleplayerBlockedMessage =
-            "You can't play singleplayer with MP mod active.\nTo play singleplayer go to \"MP Mod Menu > Settings > General > Deactivate Multiplayer Mod\"\nOr start an empty server.";
+        private const string NoSaveMessage = "No save file to load.";
 
         /// <summary>缓存解析到的 Together.SavesystemPatch.DeleteMPSave()；null 表示未解析到。</summary>
         private static bool _resolveTried;
@@ -179,8 +178,8 @@ namespace CasualtiesUnknown.SaveManager
 
             if (!HasAnySaveFile())
             {
-                ModLog.Debug("LoadRun_Prefix：联机启用但未运行且无存档 → 拦截单机读档并写状态日志");
-                StatusLog(SingleplayerBlockedMessage);
+                ModLog.Info("LoadRun_Prefix：联机启用但未运行且没有单机 save.sv → 拦截读档（游戏会当作新局重掷身份）");
+                StatusLog(NoSaveMessage);
                 return false;
             }
 
@@ -188,11 +187,17 @@ namespace CasualtiesUnknown.SaveManager
             return ContinueLoadedRun();
         }
 
-        /// <summary>读档分支：还原本地玩家 sidecar 与固定世界种子后走联机模组的继续游戏。</summary>
+        /// <summary>读档分支：联机主机按本地玩家 mp_save 恢复联机状态；单机只让 Together 读根目录 save.sv。</summary>
         private static bool ContinueLoadedRun()
         {
-            RunSettingsBridge.RestoreFromSaveFile(MpSaveLocator.ResolveLocalPlayerSavePath());
-            RestoreMpWorldSeed();
+            if (MultiplayerBridge.IsMultiplayerRunning())
+            {
+                // Together 不恢复 runSettings / 世界引擎 / 种子，由本模组按本地玩家 mp_save 补齐。
+                RunSettingsBridge.RestoreFromSaveFile(MpSaveLocator.ResolveLocalPlayerSavePath());
+                RestoreMpWorldSeed();
+            }
+
+            // 单机不走上面：遗留 mp_save 是上一场联机旧档，用它覆盖会让世界重建后像新开一局。
             MultiplayerBridge.TryLoadMultiplayerContinue(loadsave: true);
             return false;
         }
@@ -266,25 +271,29 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
+        /// <summary>
+        /// 本次读档是否真的读得到存档：与 Together 一致——联机运行看 mp_save，单机只认 save.sv。
+        /// </summary>
         private static bool HasAnySaveFile()
         {
-            if (MpSaveLocator.HasMpSave())
+            if (MpSaveLocator.IsMultiplayerSaveActive())
             {
-                return true;
+                if (MpSaveLocator.HasMpSave())
+                {
+                    return true;
+                }
+
+                string local = MpSaveLocator.ResolveLocalPlayerSavePath();
+                if (!string.IsNullOrEmpty(local) && File.Exists(local))
+                {
+                    return true;
+                }
+
+                // 会话刚开、还没写出 mp_save 时，Together 会回落读 persistentDataPath\save.sv
+                return File.Exists(MpSaveLocator.VanillaSavePath);
             }
 
-            string p = Application.persistentDataPath;
-            if (File.Exists(Path.Combine(p, "save.sv")))
-            {
-                return true;
-            }
-
-            if (File.Exists(Path.Combine(p, "mp_save", "save.sv")))
-            {
-                return true;
-            }
-
-            return File.Exists(Path.Combine(p, "autosave.sv"));
+            return File.Exists(MpSaveLocator.VanillaSavePath);
         }
 
         /// <summary>写联机模组的状态日志；Together.Multiplayer.DoMultiplayerStatusMessageLog(string) 不可用时回落本地日志。</summary>

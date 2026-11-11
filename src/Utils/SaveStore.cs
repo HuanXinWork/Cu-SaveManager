@@ -779,6 +779,35 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
+        /// <summary>读 save.sv 顶层 character（0=Experiment / 1=Milky / 2=Dune）；缺失或解析失败返回 null。
+        /// Body.charType 未标 [JsonProperty]，存档里只有这个顶层字段。</summary>
+        internal static int? TryReadCharacterFromSv(string fullPath)
+        {
+            if (string.IsNullOrEmpty(fullPath) || !File.Exists(fullPath)) return null;
+            try
+            {
+                string json = SaveSystem.Unzip(File.ReadAllBytes(fullPath));
+                if (string.IsNullOrEmpty(json)) return null;
+
+                const string Key = "\"character\":";
+                int idx = json.IndexOf(Key, StringComparison.Ordinal);
+                if (idx < 0) return null;
+
+                int p = idx + Key.Length;
+                while (p < json.Length && char.IsWhiteSpace(json[p])) p++;
+                int start = p;
+                if (p < json.Length && (json[p] == '-' || json[p] == '+')) p++;
+                while (p < json.Length && char.IsDigit(json[p])) p++;
+                if (p == start) return null;
+                return int.TryParse(json.Substring(start, p - start), out int value) ? value : (int?)null;
+            }
+            catch (Exception ex)
+            {
+                ModLog.Warning($"TryReadCharacterFromSv: 处理 {fullPath} 异常 {ex.Message}");
+                return null;
+            }
+        }
+
         /// <summary>
         /// SaveGame 写入 biome=biomeDepth+1，TryLoadGame 直接赋给 biomeDepth。
         /// 槽位/sidecar 统一存 0-based biomeDepth；从刚写完的 save.sv 解读，避免层间过渡时内存 depth 已递增。
@@ -938,15 +967,16 @@ namespace CasualtiesUnknown.SaveManager
 
         private static int ResolveRunIdFromFiles()
         {
-            // 2) 候选 .sv 文件：先单机/多人 save.sv，再 autosave.sv（save.sv 有时 cId=0 但 autosave.sv 已有真值）
+            // 2) 候选顺序按存档模式：联机会话 mp_save 优先，单机 save.sv 优先（Together 单机只读它）。
             string p = Application.persistentDataPath;
-            string[] candidates = new[]
-            {
-                Path.Combine(p, "mp_save", "save.sv"),
-                Path.Combine(p, "mp_save", "autosave.sv"),
-                Path.Combine(p, "save.sv"),
-                Path.Combine(p, "autosave.sv"),
-            };
+            string mpSave = Path.Combine(p, "mp_save", "save.sv");
+            string mpAuto = Path.Combine(p, "mp_save", "autosave.sv");
+            string spSave = Path.Combine(p, "save.sv");
+            string spAuto = Path.Combine(p, "autosave.sv");
+            // save.sv 有时 cId=0，此时再看 autosave.sv
+            string[] candidates = MpSaveLocator.IsMultiplayerSaveActive()
+                ? new[] { mpSave, mpAuto, spSave, spAuto }
+                : new[] { spSave, spAuto, mpSave, mpAuto };
             foreach (var path in candidates)
             {
                 if (!File.Exists(path)) continue;
@@ -956,7 +986,7 @@ namespace CasualtiesUnknown.SaveManager
                     if (_lastLoggedRunId != v)
                     {
                         _lastLoggedRunId = v;
-                        ModLog.Info($"ComputeCurrentRunId: 通过 {Path.GetFileName(path)} 解出 runId={v}");
+                        ModLog.Info($"ComputeCurrentRunId: 通过 {path.Substring(p.Length).TrimStart('\\')} 解出 runId={v}");
                     }
                     return v;
                 }

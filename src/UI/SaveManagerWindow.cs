@@ -551,40 +551,33 @@ namespace CasualtiesUnknown.SaveManager
             int currentRunId = SaveStore.ComputeCurrentRunId();
             DrawCurrentSaveCard(currentHash);
 
-            // 三层嵌套：runId → 日期 → 卡片。slots 已按修改时间倒序，分组时保持遇到顺序即可。
-            string lastRunId = null;
-            string lastDate = null;
-            foreach (var slot in slots)
+            // 三层嵌套：runId → 日期 → 卡片。ListSlots 按保存时刻跨冒险排序，
+            // 同一 runId 可能被别的 run 隔开，必须先分组再画，否则会出现重复组头。
+            foreach (var runGroup in GroupByRunId(slots))
             {
-                if (slot.RunIdFolder != lastRunId)
-                {
-                    lastRunId = slot.RunIdFolder;
-                    lastDate = null;
-                    int runCount = 0;
-                    foreach (var s in slots) if (s.RunIdFolder == lastRunId) runCount++;
-                    if (!_runIdExpanded.ContainsKey(lastRunId)) _runIdExpanded[lastRunId] = true;
-                    DrawRunIdHeader(lastRunId, runCount);
-                }
-                if (!_runIdExpanded[lastRunId]) continue;
+                string runIdFolder = runGroup[0].RunIdFolder;
+                if (!_runIdExpanded.ContainsKey(runIdFolder)) _runIdExpanded[runIdFolder] = true;
+                DrawRunIdHeader(runIdFolder, runGroup.Count);
+                if (!_runIdExpanded[runIdFolder]) continue;
 
-                if (slot.DateFolder != lastDate)
+                foreach (var dateGroup in GroupByDate(runGroup))
                 {
-                    lastDate = slot.DateFolder;
-                    string dateKey = RunDateKey(slot);
-                    int dateCount = 0;
-                    foreach (var s in slots) if (s.RunIdFolder == lastRunId && s.DateFolder == lastDate) dateCount++;
+                    string dateKey = RunDateKey(dateGroup[0]);
                     if (!_dateExpanded.ContainsKey(dateKey)) _dateExpanded[dateKey] = true;
-                    DrawDateHeader(lastDate, dateKey, dateCount);
-                }
-                if (!_dateExpanded[RunDateKey(slot)]) continue;
+                    DrawDateHeader(dateGroup[0].DateFolder, dateKey, dateGroup.Count);
+                    if (!_dateExpanded[dateKey]) continue;
 
-                // 当前存档判定：runId 必须匹配 + 文件 hash 一致。
-                // 单看 hash 会出现 "跨 run 但内容相同" 的存档被误标当前——比如旧 cInfo 缓存下手动保存。
-                bool isCurrent = currentHash != null
-                    && currentRunId != 0
-                    && slot.Sidecar.RunId == currentRunId
-                    && slot.Hash == currentHash;
-                DrawSlotCard(slot, isCurrent);
+                    foreach (var slot in dateGroup)
+                    {
+                        // 当前存档判定：runId 必须匹配 + 文件 hash 一致。
+                        // 单看 hash 会出现 "跨 run 但内容相同" 的存档被误标当前——比如旧 cInfo 缓存下手动保存。
+                        bool isCurrent = currentHash != null
+                            && currentRunId != 0
+                            && slot.Sidecar.RunId == currentRunId
+                            && slot.Hash == currentHash;
+                        DrawSlotCard(slot, isCurrent);
+                    }
+                }
             }
             if (slots.Count == 0)
             {
@@ -596,6 +589,42 @@ namespace CasualtiesUnknown.SaveManager
 
         /// <summary>日期折叠状态的复合 key：runId 加日期。同一日期在不同 runId 下独立折叠。</summary>
         private static string RunDateKey(SlotInfo s) => s.RunIdFolder + "/" + s.DateFolder;
+
+        /// <summary>按 RunIdFolder 分组，保持首次出现顺序（组序 = 最近一条槽位）。</summary>
+        private static List<List<SlotInfo>> GroupByRunId(List<SlotInfo> slots)
+        {
+            var groups = new List<List<SlotInfo>>();
+            var index = new Dictionary<string, List<SlotInfo>>();
+            foreach (var s in slots)
+            {
+                if (!index.TryGetValue(s.RunIdFolder, out var list))
+                {
+                    list = new List<SlotInfo>();
+                    index[s.RunIdFolder] = list;
+                    groups.Add(list);
+                }
+                list.Add(s);
+            }
+            return groups;
+        }
+
+        /// <summary>组内按 DateFolder 分组，保持首次出现顺序。</summary>
+        private static List<List<SlotInfo>> GroupByDate(List<SlotInfo> slots)
+        {
+            var groups = new List<List<SlotInfo>>();
+            var index = new Dictionary<string, List<SlotInfo>>();
+            foreach (var s in slots)
+            {
+                if (!index.TryGetValue(s.DateFolder, out var list))
+                {
+                    list = new List<SlotInfo>();
+                    index[s.DateFolder] = list;
+                    groups.Add(list);
+                }
+                list.Add(s);
+            }
+            return groups;
+        }
 
         private void DrawCurrentSaveCard(string currentHash)
         {

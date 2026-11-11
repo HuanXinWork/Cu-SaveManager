@@ -20,7 +20,7 @@ namespace CasualtiesUnknown.SaveManager
         private const string PluginGuid = "com.casualtiesUnknown.saveManager";
         private const string QolGuid = "org.bepinex.plugins.qol_unknown";
         private const string PluginName = "CuSaveManager";
-        internal const string PluginVersion = "1.3.0";
+        internal const string PluginVersion = "1.3.1";
 
         private static ManualLogSource _log;
         private static Plugin _instance;

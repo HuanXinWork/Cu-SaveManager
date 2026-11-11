@@ -21,14 +21,16 @@ namespace CasualtiesUnknown.SaveManager
             catch { return 0; }
         }
 
-        /// <summary>回档/读档前从本地玩家 save.sv 取 totalTraveled，供 MpWorldSeedInjector 在 TryLoadGame 之前算 layerSeed。</summary>
+        /// <summary>回档/读档前从磁盘取 totalTraveled（单机 save.sv / 联机本地玩家 mp_save），供 layerSeed 计算。</summary>
         internal static int ReadPersistedTotalTraveled()
         {
             if (!SaveSystem.loadedRun) return 0;
-            string path = MpSaveLocator.ResolveLocalPlayerSavePath();
-            if (path == null) return 0;
+            string path = MpSaveLocator.IsMultiplayerSaveActive()
+                ? MpSaveLocator.ResolveLocalPlayerSavePath()
+                : MpSaveLocator.VanillaSavePath;
+            if (path == null || !File.Exists(path)) return 0;
             int v = ReadTotalTraveledFromSv(path);
-            ModLog.Info($"多人层深：save.sv totalTraveled={v}（{path}）");
+            ModLog.Info($"层深：save.sv totalTraveled={v}（{path}）");
             return v;
         }
 

@@ -12,7 +12,7 @@ namespace CasualtiesUnknown.SaveManager.Interop
 {
     /// <summary>Casualties: Together 的提供方适配器，全程通过反射访问目标程序集。</summary>
     /// <remarks>
-    /// 目标程序集：CasualtiesMP.dll，BepInEx 插件 GUID "CasualtiesMP"，版本 5.3.1（版本号取自该程序集的 BepInPlugin 特性）。
+    /// 目标程序集：CasualtiesMP.dll，BepInEx 插件 GUID "CasualtiesMP"，版本 5.5.0。
     /// 依赖的目标类型：Together.Net、Together.Multiplayer、Together.NetBody、Together.ScavPlayer、Together.knetid、Together.Plugin、Together.ServerMain、Together.WorldMP。
     /// 写入器与读取器类型不直接出现：写入器类型取自 Together.Multiplayer.CreateNamedWriter(string) 的返回类型，
     /// 读取器类型取自 Together.Multiplayer.RegisterCustomServerReceiver 第 2 个形参的泛型实参，传输模式枚举取自 Together.Net.Client_Send 的第 1 个形参类型。

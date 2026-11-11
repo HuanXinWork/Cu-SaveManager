@@ -2,6 +2,10 @@
 
 > 中文更新日志：见 [changes.md](changes.md)
 
+## 1.3.1
+
+Fixed the loaded character not following the save (Milky / Dune reset to Experiment).
+
 ## 1.3.0
 
 Adapted to the 1.0 release build of the game and Together 5.4.0.

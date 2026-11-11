@@ -2,6 +2,10 @@
 
 > English changelog: see [changes.en.md](changes.en.md)
 
+## 1.3.1
+
+修复读档后角色不跟随存档（Milky / Dune 被重置为 Experiment）。
+
 ## 1.3.0
 
 适配游戏正式版 1.0 与 Together 5.4.0。
