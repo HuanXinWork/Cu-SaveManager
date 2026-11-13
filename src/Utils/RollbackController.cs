@@ -236,6 +236,8 @@ namespace CasualtiesUnknown.SaveManager
             {
                 ModLog.Info(SaveStore.DescribeSavePathDecision());
                 ModLog.Info($"执行回档：{_target.File.Name}");
+                ModLog.Flow("Rollback", "01", "target=" + _target.FullSlotPath + " sidecar=" + _target.Sidecar.Describe()
+                    + " mpRunning=" + MultiplayerBridge.IsMultiplayerRunning());
                 BroadcastLocal(I18n.T("msg.rollback_loading"));
                 TryBroadcastMP(I18n.T("msg.rollback_loading"));
 
@@ -246,11 +248,19 @@ namespace CasualtiesUnknown.SaveManager
                     : "单机槽（覆盖 save.sv → LoadScene(SampleScene)）") + " backupBefore=false");
                 // 回档入口唯一：存档覆盖 / mp_save 还原 / 世界引擎与位置准备 / sidecar 持久化全部由 RestoreSlotToSave 完成。
                 _store.RestoreSlotToSave(_target.FullSlotPath, backupBefore: false);
+                ModLog.Flow("Rollback", "02", "RestoreSlotToSave 完成");
                 if (!multiplayerSlot)
                 {
                     ModLog.Debug("执行回档：单机槽，置 SaveSystem.loadedRun=true 后 LoadScene(SampleScene)");
+                    // 回档直接切场景、不经过 PreRunScript.LoadRun，必须自己把角色写回去。
+                    PlayerCharacterBridge.ApplyForSceneReload();
                     SaveSystem.loadedRun = true;
+                    ModLog.Flow("Rollback", "03", "loadedRun=true → LoadScene(SampleScene)");
                     StartLoadSampleScene();
+                }
+                else
+                {
+                    ModLog.Flow("Rollback", "03", "多人槽 → 主机两阶段重载（由 RestoreSlotToSave 内部触发）");
                 }
             }
             catch (Exception ex)

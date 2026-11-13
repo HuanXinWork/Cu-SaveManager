@@ -53,6 +53,15 @@ namespace CasualtiesUnknown.SaveManager
 #endif
         }
 
+        /// <summary>流程诊断：统一 "[DBG][scope] step message”，用于把一次读档/存档/回档的全过程串起来。Release 中整体移除。</summary>
+        [Conditional("DEBUG")]
+        internal static void Flow(string scope, string step, string message)
+        {
+#if DEBUG
+            _sink?.LogInfo(Prefix + "[DBG][" + scope + "] " + step + " " + message);
+#endif
+        }
+
         private static void WriteToConsole(string message, string color)
         {
             if (!ShowInConsole) return;

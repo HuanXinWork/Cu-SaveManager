@@ -53,6 +53,9 @@ namespace CasualtiesUnknown.SaveManager
             try
             {
                 ModLog.Info(I18n.T("mp.rollback_reloading"));
+                // 阶段二在主菜单直接进世界，不经过 PreRunScript.LoadRun（Awake 已把 characterSelected 置 0），
+                // 按刚还原的本地玩家 mp_save 把角色写回去。
+                PlayerCharacterBridge.ApplyForSceneReload();
                 bool continued = MultiplayerBridge.TryLoadMultiplayerContinue();
                 ModLog.Debug("多人回档两阶段重载：阶段二继续游戏调用结果=" + continued);
                 if (!continued)

@@ -24,6 +24,7 @@ namespace CasualtiesUnknown.SaveManager
         {
             try
             {
+                ModLog.Flow("QoL", "01", "DisableQolIntervention present=" + Provider.IsPresent);
                 Provider.TryWriteSeed(false, 0, string.Empty);
                 Provider.TryWriteAutosaveEnabled(false);
             }
@@ -137,10 +138,15 @@ namespace CasualtiesUnknown.SaveManager
         /// <summary>把种子钉进 QoL：CurrentSeed/InputString + IsSeeded=true。QoL 不在场或 seed=0 时静默跳过。</summary>
         internal static void PinSeed(int seed, string input)
         {
-            if (!Provider.IsPresent || seed == 0) return;
+            if (!Provider.IsPresent || seed == 0)
+            {
+                ModLog.Flow("QoL", "10", "PinSeed 跳过 present=" + Provider.IsPresent + " seed=" + seed);
+                return;
+            }
             try
             {
                 Provider.TryWriteSeed(true, seed, input);
+                ModLog.Flow("QoL", "10", "PinSeed seed=" + seed + " input='" + input + "'");
             }
             catch (Exception ex)
             {
@@ -154,14 +160,18 @@ namespace CasualtiesUnknown.SaveManager
             if (sidecar == null) return;
             try
             {
+                ModLog.Flow("QoL", "11", "PrepareRollback present=" + Provider.IsPresent
+                    + " hasPos=" + sidecar.HasPlayerPos + " seed=" + sidecar.QolSeed + " input='" + sidecar.QolSeedInput + "'");
                 if (sidecar.HasPlayerPos)
                 {
                     Provider.TryWritePendingLoadPosition(new Vector3(sidecar.PlayerX, sidecar.PlayerY, 0f));
+                    ModLog.Flow("QoL", "12", "PendingLoadPosition=(" + sidecar.PlayerX.ToString("0.0") + "," + sidecar.PlayerY.ToString("0.0") + ")");
                 }
 
                 if (sidecar.QolSeed != 0 || !string.IsNullOrEmpty(sidecar.QolSeedInput))
                 {
                     Provider.TryWriteSeed(true, sidecar.QolSeed, sidecar.QolSeedInput);
+                    ModLog.Flow("QoL", "13", "SeedManager←seed=" + sidecar.QolSeed + " input='" + sidecar.QolSeedInput + "'");
                 }
             }
             catch (Exception ex)

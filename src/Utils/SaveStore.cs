@@ -61,10 +61,13 @@ namespace CasualtiesUnknown.SaveManager
         /// 调用前须已执行 SaveSystem.SaveGame()。</summary>
         internal string SaveManual(string nickname)
         {
+            ModLog.Flow("SaveSlot", "01", "手动保存 nickname='" + (nickname ?? "") + "' mode=" + (ShouldUseMpSave() ? "mp" : "single")
+                + " save.sv=" + File.Exists(GameSavePath));
             var ctx = SnapshotGameContextFromSavedGame();
             PersistCurrentSaveForContinue(ctx);
             string path = WriteSlotFile(ctx, isAuto: false);
             BuildSidecar(ctx, nickname ?? "", isAuto: false).Save(path);
+            ModLog.Flow("SaveSlot", "02", "手动保存完成 → " + path);
             return path;
         }
 
@@ -72,11 +75,13 @@ namespace CasualtiesUnknown.SaveManager
         /// 调用前须已执行 SaveSystem.SaveGame()。</summary>
         internal string AutoBackup(int keep)
         {
+            ModLog.Flow("SaveSlot", "11", "自动备份 keep=" + keep + " mode=" + (ShouldUseMpSave() ? "mp" : "single"));
             var ctx = SnapshotGameContextFromSavedGame();
             PersistCurrentSaveForContinue(ctx);
             string path = WriteSlotFile(ctx, isAuto: true);
             BuildSidecar(ctx, "", isAuto: true).Save(path);
             PruneAutoBackups(keep);
+            ModLog.Flow("SaveSlot", "12", "自动备份完成 → " + path);
             return path;
         }
 
@@ -242,6 +247,9 @@ namespace CasualtiesUnknown.SaveManager
             ModLog.Info(DescribeSavePathDecision());
             var sidecar = SlotSidecar.LoadOrEmpty(slotFullPath);
             bool mpRunning = MultiplayerBridge.IsMultiplayerRunning();
+            ModLog.Flow("SwitchSlot", "01", "入参 slot=" + slotFullPath + " backupBefore=" + backupBefore
+                + " mpRunning=" + mpRunning + " size=" + new FileInfo(slotFullPath).Length
+                + " sidecar=" + sidecar.Describe());
             ModLog.Debug("RestoreSlotToSave：入参 槽=" + Path.GetFileName(slotFullPath) + " backupBefore=" + backupBefore
                 + " 当前mpRunning=" + mpRunning + " sidecar.IsMultiplayer=" + sidecar.IsMultiplayer);
 
@@ -253,6 +261,7 @@ namespace CasualtiesUnknown.SaveManager
                     throw new InvalidOperationException(I18n.T("mp.slot_needs_mp_session"));
                 }
                 ModLog.Debug("RestoreSlotToSave：分支=多人槽（还原 mp_save → 回主菜单 → 两阶段重载）");
+                ModLog.Flow("SwitchSlot", "02", "分支=多人槽");
                 RestoreMultiplayerSlot(slotFullPath, backupBefore);
                 ModLog.Debug("RestoreSlotToSave：返回（void，多人分支已触发主机重载）");
                 return;
@@ -273,12 +282,16 @@ namespace CasualtiesUnknown.SaveManager
                 ModLog.Debug("RestoreSlotToSave：回档前已备份当前 save.sv → " + Path.GetFileName(bakPath));
             }
             ModLog.Debug("RestoreSlotToSave：分支=单机槽（覆盖 save.sv + 还原世界引擎/位置）");
+            ModLog.Flow("SwitchSlot", "03", "分支=单机槽 → 覆盖 " + game);
             File.Copy(slotFullPath, game, overwrite: true);
             NormalizeSaveBiome(game, sidecar.Biome);
             InvalidateRunIdCache();
+            ModLog.Flow("SwitchSlot", "04", "save.sv 已写入 size=" + new FileInfo(game).Length
+                + " cId=" + ReadRunIdFromSv(game) + " character=" + (TryReadCharacterFromSv(game)?.ToString() ?? "?"));
             // 先 PrepareWorldForSlot：qol 引擎可能补记 sidecar.QolSeed，之后再持久化
             PrepareWorldForSlot(sidecar);
             PersistCurrentSaveSidecar(sidecar);
+            ModLog.Flow("SwitchSlot", "05", "世界准备完成 sidecar=" + sidecar.Describe());
             ModLog.Debug("RestoreSlotToSave：返回（void，单机槽已写入 save.sv 并准备世界）");
         }
 
@@ -371,6 +384,7 @@ namespace CasualtiesUnknown.SaveManager
         internal void PrepareWorldForSlot(SlotSidecar sidecar)
         {
             if (sidecar == null) return;
+            ModLog.Flow("PrepareWorld", "01", "sidecar=" + sidecar.Describe());
             // bug2：本层词条按存档还原，阻止游戏 ApplyLayerModifiers 重滚；两套引擎都生效。
             ApplyLayerModifiersRestorePatch.PendingIndex = sidecar.ActiveLayerModifierIndex;
             RunSettingsBridge.RestoreFromSaveFile(sidecar.IsMultiplayer
@@ -384,6 +398,9 @@ namespace CasualtiesUnknown.SaveManager
             }
             bool wantSelf = eff == "self";
             ModLog.Info($"回档引擎={eff} (sidecar.WorldEngine='{sidecar.WorldEngine}')");
+            ModLog.Flow("PrepareWorld", "02", "eff='" + eff + "' wantSelf=" + wantSelf
+                + " seed=" + sidecar.QolSeed + " input='" + sidecar.QolSeedInput + "'"
+                + " layerMod=" + sidecar.ActiveLayerModifierIndex);
             ModLog.Debug("回档种子来源=" + DescribeRestoreSeedSource(sidecar, eff));
 
             if (wantSelf)
@@ -447,23 +464,39 @@ namespace CasualtiesUnknown.SaveManager
         /// <summary>主菜单 Continue 前准备当前 save.sv：优先读 companion 元数据，缺失时按当前配置补齐。</summary>
         internal void PrepareCurrentSaveForContinue()
         {
-            if (ShouldUseMpSave()) return;
-            if (!File.Exists(GameSavePath)) return;
+            if (ShouldUseMpSave())
+            {
+                ModLog.Flow("ContinuePrep", "01", "联机会话运行中 → 跳过单机准备");
+                return;
+            }
+            if (!File.Exists(GameSavePath))
+            {
+                ModLog.Flow("ContinuePrep", "01", "没有 save.sv → 跳过：" + GameSavePath);
+                return;
+            }
 
             var sidecar = SlotSidecar.LoadOrEmpty(GameSavePath);
-            if (IsEmptySidecar(sidecar)) sidecar = BuildFallbackCurrentSaveSidecar();
+            bool empty = IsEmptySidecar(sidecar);
+            ModLog.Flow("ContinuePrep", "01", "save.sv size=" + new FileInfo(GameSavePath).Length
+                + " sidecarExists=" + File.Exists(GameSavePath + ".json") + " empty=" + empty
+                + " sidecar=" + sidecar.Describe());
+            if (empty) sidecar = BuildFallbackCurrentSaveSidecar();
             else FillMissingContinueFields(sidecar);
+            ModLog.Flow("ContinuePrep", "02", "补全后 sidecar=" + sidecar.Describe());
 
             sidecar.WorldEngine = ResolveCurrentPreferredEngineName();
             sidecar.PosMode = WorldEngineArbiter.PositionMode;
             sidecar.FixedX = WorldEngineArbiter.FixedX;
             sidecar.FixedY = WorldEngineArbiter.FixedY;
+            ModLog.Flow("ContinuePrep", "03", "按当前配置覆盖 engine='" + sidecar.WorldEngine
+                + "' posMode='" + sidecar.PosMode + "' fixed=(" + sidecar.FixedX.ToString("0.0") + "," + sidecar.FixedY.ToString("0.0") + ")");
 
             // 不在此处改写 biome：save.sv 的 biome 由存档时刻按是否在层底写定（层底=进下一层，保留 biomeDepth+1；
             // 层中=原位续玩，已规范回当前层）。主菜单 Continue 时拿不到场内玩家位置，重复规范会把进层用的 biomeDepth+1 改回当前层=卡层。
             InvalidateRunIdCache();
             PrepareWorldForSlot(sidecar);
             PersistCurrentSaveSidecar(sidecar);
+            ModLog.Flow("ContinuePrep", "04", "完成 engine='" + sidecar.WorldEngine + "' seed=" + sidecar.QolSeed);
         }
 
         private static Vector3? ResolveSpawnPosition(SlotSidecar sidecar)
@@ -508,6 +541,7 @@ namespace CasualtiesUnknown.SaveManager
         {
             if (sidecar == null || ShouldUseMpSave()) return;
             sidecar.Save(GameSavePath);
+            ModLog.Flow("Sidecar", "01", "写回 " + GameSavePath + ".json " + sidecar.Describe());
         }
 
         /// <summary>多人续玩种子持久化：把当前 run 种子/引擎写进本地玩家存档 mp_save/&lt;id&gt;/save.sv
@@ -613,6 +647,7 @@ namespace CasualtiesUnknown.SaveManager
 
         internal void DeleteSlot(string slotFullPath)
         {
+            ModLog.Flow("SlotIO", "01", "删除槽位 " + slotFullPath + " sidecar=" + SlotSidecar.LoadOrEmpty(slotFullPath).Describe());
             try { if (File.Exists(slotFullPath)) File.Delete(slotFullPath); } catch { }
             SlotSidecar.DeleteFor(slotFullPath);
             try
@@ -946,6 +981,11 @@ namespace CasualtiesUnknown.SaveManager
                     {
                         _cachedRunId = v;
                         _runIdCacheValid = true;
+                        if (_lastLoggedRunId != v)
+                        {
+                            _lastLoggedRunId = v;
+                            ModLog.Flow("RunId", "01", "内存 WoundView.cInfo=[" + string.Join(",", view.cInfo) + "] → runId=" + v);
+                        }
                         return v;
                     }
                 }
@@ -967,32 +1007,24 @@ namespace CasualtiesUnknown.SaveManager
 
         private static int ResolveRunIdFromFiles()
         {
-            // 2) 候选顺序按存档模式：联机会话 mp_save 优先，单机 save.sv 优先（Together 单机只读它）。
             string p = Application.persistentDataPath;
             string mpSave = Path.Combine(p, "mp_save", "save.sv");
             string mpAuto = Path.Combine(p, "mp_save", "autosave.sv");
             string spSave = Path.Combine(p, "save.sv");
             string spAuto = Path.Combine(p, "autosave.sv");
-            // save.sv 有时 cId=0，此时再看 autosave.sv
-            string[] candidates = MpSaveLocator.IsMultiplayerSaveActive()
-                ? new[] { mpSave, mpAuto, spSave, spAuto }
-                : new[] { spSave, spAuto, mpSave, mpAuto };
-            foreach (var path in candidates)
+            bool mpActive = MpSaveLocator.IsMultiplayerSaveActive();
+
+            // 2) 主存档优先：联机会话 mp_save，单机 save.sv（Together 单机只读它）。
+            foreach (var path in mpActive ? new[] { mpSave, mpAuto } : new[] { spSave })
             {
-                if (!File.Exists(path)) continue;
-                int v = ReadRunIdFromSv(path);
-                if (v != 0)
-                {
-                    if (_lastLoggedRunId != v)
-                    {
-                        _lastLoggedRunId = v;
-                        ModLog.Info($"ComputeCurrentRunId: 通过 {path.Substring(p.Length).TrimStart('\\')} 解出 runId={v}");
-                    }
-                    return v;
-                }
+                int v = TryRunIdFromCandidate(path, p);
+                if (v != 0) return v;
             }
-            // 3) 当前存档 sidecar：游戏 TryLoadGame 结束会删 save.sv，但 save.sv.json 仍在，记录着本 run 的 runId
-            int sc = SlotSidecar.LoadOrEmpty(GameSavePath).RunId;
+
+            // 3) 当前存档 sidecar：游戏 TryLoadGame 结束会删 save.sv，但 save.sv.json 仍在，记录着本 run 的 runId。
+            //    必须排在 autosave / 遗留 mp_save 之前——读档后 save.sv 已被消耗，那些文件可能属于别的 run。
+            //    新开局（loadedRun=false）时 save.sv.json 是上一局的残留，不能当本 run。
+            int sc = SaveSystem.loadedRun ? SlotSidecar.LoadOrEmpty(GameSavePath).RunId : 0;
             if (sc != 0)
             {
                 if (_lastLoggedRunId != sc)
@@ -1002,12 +1034,39 @@ namespace CasualtiesUnknown.SaveManager
                 }
                 return sc;
             }
+
+            // 4) 兜底：save.sv 有时 cId=0，此时再看 autosave.sv / 另一模式的文件
+            foreach (var path in mpActive ? new[] { spSave, spAuto } : new[] { spAuto, mpSave, mpAuto })
+            {
+                int v = TryRunIdFromCandidate(path, p);
+                if (v != 0) return v;
+            }
+
             if (_lastLoggedRunId != 0)
             {
                 _lastLoggedRunId = 0;
                 ModLog.Warning("ComputeCurrentRunId: 所有候选 .sv 与 sidecar 都解不出 runId，返回 0");
             }
             return 0;
+        }
+
+        /// <summary>读单个候选文件的 cId；日志带相对路径，便于区分两个 save.sv。</summary>
+        private static int TryRunIdFromCandidate(string path, string root)
+        {
+            if (!File.Exists(path))
+            {
+                ModLog.Flow("RunId", "03", "候选缺失 " + path);
+                return 0;
+            }
+            int v = ReadRunIdFromSv(path);
+            ModLog.Flow("RunId", "03", "候选 " + path + " exists=true cId=" + v);
+            if (v == 0) return 0;
+            if (_lastLoggedRunId != v)
+            {
+                _lastLoggedRunId = v;
+                ModLog.Info($"ComputeCurrentRunId: 通过 {path.Substring(root.Length).TrimStart('\\')} 解出 runId={v}");
+            }
+            return v;
         }
 
         /// <summary>当前游戏存档的 hash：多人取 mp_rules.json，单机取 save.sv；不存在返回 null。</summary>
@@ -1034,6 +1093,7 @@ namespace CasualtiesUnknown.SaveManager
                 {
                     try { DeleteSlot(s.FullSlotPath); } catch { }
                 }
+                ModLog.Flow("PruneAuto", "01", "runId=" + currentRunId + " keep=" + keep + " 删除=" + autos.Count);
             }
             catch { }
         }
@@ -1067,6 +1127,8 @@ namespace CasualtiesUnknown.SaveManager
 
             if (mp) MpSaveLocator.PackMpSaveTo(dst);
             else File.Copy(GameSavePath, dst, overwrite: false);
+            ModLog.Flow("SlotIO", "11", (mp ? "打包 mp_save" : "复制 save.sv") + " → " + dst
+                + " runId=" + runId + " (ctx.RunId=" + ctx.RunId + ") biome=" + ctx.Biome + " size=" + new FileInfo(dst).Length);
             return dst;
         }
 
@@ -1111,7 +1173,7 @@ namespace CasualtiesUnknown.SaveManager
                 qolSeed = SeededWorldEngine.CurrentSeed;
                 qolInput = SeededWorldEngine.InputString;
             }
-            return new GameContext
+            var ctx = new GameContext
             {
                 Biome = biome,
                 RunId = ComputeCurrentRunId(),
@@ -1123,6 +1185,11 @@ namespace CasualtiesUnknown.SaveManager
                 WorldEngine = ResolveCurrentPreferredEngineName(),
                 ActiveLayerModifierIndex = LayerModifierSnapshot.CurrentActiveIndex(),
             };
+            ModLog.Flow("Snapshot", "01", "biome=" + ctx.Biome + " runId=" + ctx.RunId
+                + " pos=" + (ctx.HasPlayerPos ? "(" + ctx.PlayerX.ToString("0.0") + "," + ctx.PlayerY.ToString("0.0") + ")" : "none")
+                + " engine='" + ctx.WorldEngine + "' seed=" + ctx.QolSeed + " input='" + ctx.QolSeedInput + "'"
+                + " layerMod=" + ctx.ActiveLayerModifierIndex);
+            return ctx;
         }
 
         private struct GameContext

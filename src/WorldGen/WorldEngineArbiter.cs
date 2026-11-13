@@ -47,12 +47,15 @@ namespace CasualtiesUnknown.SaveManager
         {
             string pref = NormalizeEngineName(preferred ?? PreferredEngine);
             bool mpEnabled = MultiplayerBridge.IsMultiplayerEnabled();
+            bool qol = QolBridge.IsQolPresent();
             // 「本 mod 固定世界」是显式 opt-in：只有用户主动选 self 才启用确定化引擎。
-            if (pref == "self") return "self";
-            if (pref == "krok" && mpEnabled) return "krok";
-            if (pref == "qol" && QolBridge.IsQolPresent()) return "qol";
-            if (mpEnabled) return "krok";
-            return "self";
+            string result;
+            if (pref == "self") result = "self";
+            else if (pref == "krok" && mpEnabled) result = "krok";
+            else if (pref == "qol" && qol) result = "qol";
+            else result = mpEnabled ? "krok" : "self";
+            ModLog.Flow("Engine", "01", "pref='" + pref + "' mpEnabled=" + mpEnabled + " qol=" + qol + " → " + result);
+            return result;
         }
 
         internal static WorldEngine ResolveEffectiveEngine(string preferred = null)
@@ -173,6 +176,7 @@ namespace CasualtiesUnknown.SaveManager
         internal static void Apply(WorldEngine engine, int seed, string seedInput)
         {
             Current = engine;
+            ModLog.Flow("Engine", "02", "Apply " + engine + " seed=" + seed + " input='" + seedInput + "'");
             if (engine == WorldEngine.Self)
             {
                 QolBridge.DisableQolIntervention();

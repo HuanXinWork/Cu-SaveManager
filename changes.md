@@ -2,6 +2,14 @@
 
 > English changelog: see [changes.en.md](changes.en.md)
 
+## 1.3.2
+
+修复回档后角色被重置为 Experiment（Milky / Dune 同样生效）。
+
+修复「当前存档」卡片在游戏内与读档后误显示「无存档」。
+
+新增 Debug 构建的流程日志（读档 / 回档 / 存档 / 换档 / 种子，Release 不含）。
+
 ## 1.3.1
 
 修复读档后角色不跟随存档（Milky / Dune 被重置为 Experiment）。

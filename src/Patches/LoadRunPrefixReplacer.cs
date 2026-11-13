@@ -156,34 +156,38 @@ namespace CasualtiesUnknown.SaveManager
         {
             if (!MultiplayerBridge.IsMultiplayerEnabled())
             {
-                ModLog.Debug("LoadRun_Prefix：联机模组未启用 → 放行原版读档");
+                ModLog.Flow("LoadRun", "20", "联机模组未启用 → 放行原版 LoadRun");
                 return true;
             }
 
             bool running = MultiplayerBridge.IsMultiplayerRunning();
-            ModLog.Info($"LoadRun_Prefix：mp=true netRunning={running} hasSave={HasAnySaveFile()}");
+            bool server = MultiplayerBridge.IsServer();
+            bool hasSave = HasAnySaveFile();
+            ModLog.Flow("LoadRun", "20", "mp=true running=" + running + " server=" + server + " hasSave=" + hasSave);
+            ModLog.Info($"LoadRun_Prefix：mp=true netRunning={running} hasSave={hasSave}");
 
             if (running)
             {
-                if (!MultiplayerBridge.IsServer())
+                if (!server)
                 {
-                    ModLog.Debug("LoadRun_Prefix：联机运行且本端为客户端 → 拦截并写状态日志");
+                    ModLog.Flow("LoadRun", "21", "联机运行且本端为客户端 → 拦截");
                     StatusLog(ClientCannotStartMessage);
                     return false;
                 }
 
-                ModLog.Debug("LoadRun_Prefix：联机运行且本端为主机 → 继续游戏（LoadVanillaGeneratedWorld(true)）");
+                ModLog.Flow("LoadRun", "22", "联机运行且本端为主机 → ContinueLoadedRun（mp_save）");
                 return ContinueLoadedRun();
             }
 
-            if (!HasAnySaveFile())
+            if (!hasSave)
             {
+                ModLog.Flow("LoadRun", "23", "未运行且没有单机 save.sv → 拦截（避免空加载重掷身份）");
                 ModLog.Info("LoadRun_Prefix：联机启用但未运行且没有单机 save.sv → 拦截读档（游戏会当作新局重掷身份）");
                 StatusLog(NoSaveMessage);
                 return false;
             }
 
-            ModLog.Debug("LoadRun_Prefix：联机启用但未运行且有存档 → 继续游戏（单机读档）");
+            ModLog.Flow("LoadRun", "24", "未运行但单机有存档 → ContinueLoadedRun（save.sv）");
             return ContinueLoadedRun();
         }
 
@@ -192,13 +196,19 @@ namespace CasualtiesUnknown.SaveManager
         {
             if (MultiplayerBridge.IsMultiplayerRunning())
             {
+                string mp = MpSaveLocator.ResolveLocalPlayerSavePath();
+                ModLog.Flow("LoadRun", "30", "联机续玩：本地档=" + (mp ?? "<none>") + " sidecar=" + SlotSidecar.LoadOrEmpty(mp).Describe());
                 // Together 不恢复 runSettings / 世界引擎 / 种子，由本模组按本地玩家 mp_save 补齐。
-                RunSettingsBridge.RestoreFromSaveFile(MpSaveLocator.ResolveLocalPlayerSavePath());
+                RunSettingsBridge.RestoreFromSaveFile(mp);
                 RestoreMpWorldSeed();
             }
+            else
+            {
+                ModLog.Flow("LoadRun", "30", "单机续玩：世界已按 save.sv + sidecar 准备，不再读 mp_save");
+            }
 
-            // 单机不走上面：遗留 mp_save 是上一场联机旧档，用它覆盖会让世界重建后像新开一局。
-            MultiplayerBridge.TryLoadMultiplayerContinue(loadsave: true);
+            bool ok = MultiplayerBridge.TryLoadMultiplayerContinue(loadsave: true);
+            ModLog.Flow("LoadRun", "31", "Together 读档调用 ok=" + ok + " loadedRun=" + SaveSystem.loadedRun);
             return false;
         }
 
@@ -207,33 +217,35 @@ namespace CasualtiesUnknown.SaveManager
         {
             if (!MultiplayerBridge.IsMultiplayerEnabled())
             {
-                ModLog.Debug("StartRun_Prefix：联机模组未启用 → 放行原版单机新局");
+                ModLog.Flow("StartRun", "01", "联机模组未启用 → 放行原版单机新局");
                 return true;
             }
 
             if (!MultiplayerBridge.IsMultiplayerRunning())
             {
-                ModLog.Debug("StartRun_Prefix：联机模组启用但未开房 → 放行原版单机新局");
+                ModLog.Flow("StartRun", "01", "联机模组启用但未开房 → 放行原版单机新局");
                 return true;
             }
 
             if (!MultiplayerBridge.IsServer())
             {
-                ModLog.Debug("StartRun_Prefix：联机运行且本端为客户端 → 拦截并写状态日志");
+                ModLog.Flow("StartRun", "02", "联机运行且本端为客户端 → 拦截");
                 StatusLog(ClientCannotStartMessage);
                 return false;
             }
 
+            ModLog.Flow("StartRun", "03", "主机开新局：清旧 mp_save 后 LoadVanillaGeneratedWorld(false)");
             DeleteMpSave();
             ModLog.Info("StartRun：联机运行中，走 Together.WorldMP.LoadVanillaGeneratedWorld(false)");
-            ModLog.Debug("StartRun_Prefix：本端为主机 → 清旧 mp_save 后 LoadVanillaGeneratedWorld(false)");
             SaveSystem.loadedRun = false;
             if (__instance != null && __instance.runSettings != null)
             {
                 WorldGeneration.runSettings = __instance.runSettings;
+                ModLog.Flow("StartRun", "04", "runSettings 取菜单预设 count=" + __instance.runSettings.Count);
             }
 
-            MultiplayerBridge.TryLoadMultiplayerContinue(loadsave: false);
+            bool ok = MultiplayerBridge.TryLoadMultiplayerContinue(loadsave: false);
+            ModLog.Flow("StartRun", "05", "Together 新局调用 ok=" + ok + " loadedRun=" + SaveSystem.loadedRun);
             return false;
         }
 
@@ -261,7 +273,9 @@ namespace CasualtiesUnknown.SaveManager
         {
             try
             {
-                SlotSidecar sidecar = SlotSidecar.LoadOrEmpty(MpSaveLocator.ResolveLocalPlayerSavePath());
+                string mp = MpSaveLocator.ResolveLocalPlayerSavePath();
+                SlotSidecar sidecar = SlotSidecar.LoadOrEmpty(mp);
+                ModLog.Flow("StartRun", "10", "联机续玩 sidecar: path=" + (mp ?? "<none>") + " " + sidecar.Describe());
                 WorldEngineArbiter.PrepareMpRollback(sidecar);
                 ModLog.Info($"多人续玩：还原世界引擎/种子 engine='{sidecar.WorldEngine}' seed={sidecar.QolSeed}");
             }
@@ -278,22 +292,23 @@ namespace CasualtiesUnknown.SaveManager
         {
             if (MpSaveLocator.IsMultiplayerSaveActive())
             {
-                if (MpSaveLocator.HasMpSave())
-                {
-                    return true;
-                }
-
+                bool rules = MpSaveLocator.HasMpSave();
                 string local = MpSaveLocator.ResolveLocalPlayerSavePath();
-                if (!string.IsNullOrEmpty(local) && File.Exists(local))
+                bool localSave = !string.IsNullOrEmpty(local) && File.Exists(local);
+                bool vanilla = File.Exists(MpSaveLocator.VanillaSavePath);
+                ModLog.Flow("LoadRun", "25", "hasSave(联机) mpRules=" + rules + " localSave=" + localSave + " vanilla=" + vanilla);
+                if (rules || localSave)
                 {
                     return true;
                 }
 
                 // 会话刚开、还没写出 mp_save 时，Together 会回落读 persistentDataPath\save.sv
-                return File.Exists(MpSaveLocator.VanillaSavePath);
+                return vanilla;
             }
 
-            return File.Exists(MpSaveLocator.VanillaSavePath);
+            bool has = File.Exists(MpSaveLocator.VanillaSavePath);
+            ModLog.Flow("LoadRun", "25", "hasSave(单机) save.sv=" + has + " path=" + MpSaveLocator.VanillaSavePath);
+            return has;
         }
 
         /// <summary>写联机模组的状态日志；Together.Multiplayer.DoMultiplayerStatusMessageLog(string) 不可用时回落本地日志。</summary>

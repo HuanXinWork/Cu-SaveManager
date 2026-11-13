@@ -25,10 +25,12 @@ namespace CasualtiesUnknown.SaveManager
             {
                 IsActive = false;
                 CurrentSeed = 0;
+                ModLog.Flow("Seed", "01", "SetManualSeed 空 → 关闭确定化");
                 return;
             }
             IsActive = true;
             CurrentSeed = int.TryParse(input, out int v) ? v : StableHash(input);
+            ModLog.Flow("Seed", "01", "SetManualSeed input='" + input + "' → seed=" + CurrentSeed);
         }
 
         /// <summary>用指定种子与输入串直接激活（回档/读档时按 sidecar 还原用）。</summary>
@@ -37,6 +39,7 @@ namespace CasualtiesUnknown.SaveManager
             CurrentSeed = seed != 0 ? seed : 1;
             InputString = input ?? "";
             IsActive = true;
+            ModLog.Flow("Seed", "02", "Activate seed=" + CurrentSeed + " input='" + InputString + "'（传入 seed=" + seed + "）");
         }
 
         /// <summary>新开局时生成一个一次性随机种子并激活。</summary>
@@ -47,6 +50,7 @@ namespace CasualtiesUnknown.SaveManager
             CurrentSeed = seed;
             InputString = seed.ToString();
             IsActive = true;
+            ModLog.Flow("Seed", "03", "EnsureFreshSeed 新开局 seed=" + seed);
         }
 
         internal static void Deactivate()
@@ -55,6 +59,7 @@ namespace CasualtiesUnknown.SaveManager
             CurrentSeed = 0;
             InputString = "";
             MpReseedEnabled = false;
+            ModLog.Flow("Seed", "04", "Deactivate（self 引擎关闭）");
         }
 
         /// <summary>当前层的种子：基础种子叠加 totalTraveled 偏移，保证逐层不同但可复现。
@@ -73,7 +78,9 @@ namespace CasualtiesUnknown.SaveManager
                 try { traveled = MpSaveLayerHelper.ReadPersistedTotalTraveled(); }
                 catch { }
             }
-            return CurrentSeed + traveled * 265443576;
+            int seed = CurrentSeed + traveled * 265443576;
+            ModLog.Flow("Seed", "05", "LayerSeed base=" + CurrentSeed + " traveled=" + traveled + " → " + seed);
+            return seed;
         }
 
         private static int StableHash(string s)

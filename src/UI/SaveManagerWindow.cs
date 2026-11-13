@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using BepInEx.Configuration;
 using UnityEngine;
 
@@ -637,11 +638,27 @@ namespace CasualtiesUnknown.SaveManager
             int runId = SaveStore.ComputeCurrentRunId();
             string sub;
             if (SaveStore.IsMultiplayerContextActive())
+            {
                 sub = runId != 0 ? I18n.F("fmt.run_id", runId) : I18n.T("mp.current_save_hint");
+            }
+            else if (currentHash != null)
+            {
+                sub = runId == 0 ? I18n.T("msg.run_id_unknown") : I18n.F("fmt.run_id", runId);
+            }
+            else if (WorldGeneration.world != null)
+            {
+                // 游戏内：进度还在内存，save.sv 只在保存时才写。
+                sub = runId != 0 ? I18n.F("fmt.run_id_in_memory", runId) : I18n.T("msg.progress_in_memory");
+            }
+            else if (SaveSystem.loadedRun && File.Exists(SlotSidecar.SidecarPath(SaveStore.GameSavePath)))
+            {
+                // 主菜单：读档后游戏删了 save.sv，但 sidecar 还在，说明本 run 的进度刚被读过。
+                sub = runId != 0 ? I18n.F("fmt.run_id_after_load", runId) : I18n.T("msg.after_load_not_saved");
+            }
             else
-                sub = currentHash == null
-                    ? I18n.T("msg.no_save_yet")
-                    : (runId == 0 ? I18n.T("msg.run_id_unknown") : I18n.F("fmt.run_id", runId));
+            {
+                sub = I18n.T("msg.no_save_yet");
+            }
             GUILayout.Label(sub);
             GUILayout.EndVertical();
             GUILayout.Space(8f);

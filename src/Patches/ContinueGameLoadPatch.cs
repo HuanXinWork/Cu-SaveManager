@@ -1,6 +1,5 @@
 using System;
 using System.IO;
-using System.Reflection;
 using HarmonyLib;
 
 namespace CasualtiesUnknown.SaveManager
@@ -16,19 +15,36 @@ namespace CasualtiesUnknown.SaveManager
     [HarmonyPriority(Priority.First)]
     internal static class ContinueGameLoadPatch
     {
-        /// <summary>PreRunScript.savedCharacter（私有实例字段）；原版 LoadRun 用它覆盖 characterSelected。</summary>
-        private static readonly FieldInfo SavedCharacterField = AccessTools.Field(typeof(PreRunScript), "savedCharacter");
-
         private static void Prefix(PreRunScript __instance)
         {
             try
             {
+                ModLog.Flow("LoadRun", "01", "入口 mpPresent=" + MultiplayerBridge.IsModPresent()
+                    + " mpEnabled=" + MultiplayerBridge.IsMultiplayerEnabled()
+                    + " mpRunning=" + MultiplayerBridge.IsMultiplayerRunning()
+                    + " mpServer=" + MultiplayerBridge.IsServer()
+                    + " save.sv=" + File.Exists(MpSaveLocator.VanillaSavePath)
+                    + " mpSave=" + MpSaveLocator.HasMpSave()
+                    + " mpLocal=" + (MpSaveLocator.ResolveLocalPlayerSavePath() ?? "<none>"));
+
                 RestoreCharacterFromSaveFile(__instance);
-                if (MultiplayerBridge.IsMultiplayerRunning()) return;
+
+                if (MultiplayerBridge.IsMultiplayerRunning())
+                {
+                    ModLog.Flow("LoadRun", "02", "联机会话运行中 → 跳过单机世界准备（由 LoadRunPrefixReplacer 处理）");
+                    return;
+                }
+
                 // 单机（含联机模组在场未开房）必须按 save.sv 准备世界：
                 // 否则 LoadRunPrefixReplacer 会用旧 mp_save 覆盖引擎/种子/位置/难度。
-                if (!SaveStore.CurrentSaveExists()) return;
+                if (!SaveStore.CurrentSaveExists())
+                {
+                    ModLog.Flow("LoadRun", "03", "没有当前 save.sv → 跳过单机世界准备");
+                    return;
+                }
+
                 new SaveStore().PrepareCurrentSaveForContinue();
+                ModLog.Flow("LoadRun", "04", "单机世界准备完成");
             }
             catch (Exception ex)
             {
@@ -36,21 +52,8 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        /// <summary>从当前存档顶层 character 恢复角色：联机运行中读本地玩家 mp_save，单机读 save.sv；读不到时保持原行为。</summary>
+        /// <summary>从当前存档恢复角色（联机运行中读本地玩家 mp_save，单机读 save.sv）。</summary>
         private static void RestoreCharacterFromSaveFile(PreRunScript instance)
-        {
-            string sv = MultiplayerBridge.IsMultiplayerRunning()
-                ? (MpSaveLocator.ResolveLocalPlayerSavePath() ?? MpSaveLocator.VanillaSavePath)
-                : MpSaveLocator.VanillaSavePath;
-            int? character = SaveStore.TryReadCharacterFromSv(sv);
-            if (character == null) return;
-
-            PreRunScript.characterSelected = character.Value;
-            if (SavedCharacterField != null && instance != null)
-            {
-                SavedCharacterField.SetValue(instance, character.Value);
-            }
-            ModLog.Info($"读档角色恢复：character={character.Value}（{Path.GetFileName(sv)}）");
-        }
+            => PlayerCharacterBridge.Apply(PlayerCharacterBridge.ResolveCurrentSavePath(), instance);
     }
 }

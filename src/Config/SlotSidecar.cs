@@ -74,6 +74,18 @@ namespace CasualtiesUnknown.SaveManager
         /// <remarks>回档时由 <see cref="MpPersistentIdMapper"/> 用来把旧持久 ID 映射到当前会话的持久 ID。</remarks>
         internal List<SlotMpPlayer> MpPlayers { get; set; } = new List<SlotMpPlayer>();
 
+        /// <summary>Debug 日志用的紧凑描述。</summary>
+        internal string Describe()
+        {
+            string pos = HasPlayerPos ? "(" + PlayerX.ToString("0.0") + "," + PlayerY.ToString("0.0") + ")" : "none";
+            return "runId=" + RunId + " biome=" + Biome
+                + " engine='" + WorldEngine + "' mpEngine='" + MpWorldEngine + "'"
+                + " seed=" + QolSeed + " input='" + QolSeedInput + "'"
+                + " pos=" + pos + " posMode='" + PosMode + "'"
+                + " auto=" + IsAuto + " pinned=" + Pinned + " mp=" + IsMultiplayer
+                + " layerMod=" + ActiveLayerModifierIndex + " players=" + (MpPlayers?.Count ?? 0);
+        }
+
         /// <summary>
         /// 从指定路径加载.json元数据；若文件不存在或解析失败，返回空实例。
         /// </summary>

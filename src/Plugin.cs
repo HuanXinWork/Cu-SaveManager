@@ -20,7 +20,7 @@ namespace CasualtiesUnknown.SaveManager
         private const string PluginGuid = "com.casualtiesUnknown.saveManager";
         private const string QolGuid = "org.bepinex.plugins.qol_unknown";
         private const string PluginName = "CuSaveManager";
-        internal const string PluginVersion = "1.3.1";
+        internal const string PluginVersion = "1.3.2";
 
         private static ManualLogSource _log;
         private static Plugin _instance;
@@ -193,6 +193,7 @@ namespace CasualtiesUnknown.SaveManager
                 else
                     GameSaveBridge.TrySaveGame();
                 string path = _store.SaveManual(nickname);
+                ModLog.Flow("UI", "11", "手动保存完成 " + path + " nickname='" + (nickname ?? "") + "'");
                 SetMessage(I18n.F("fmt.saved_to", System.IO.Path.GetFileName(path), SaveStore.CurrentSaveDisplayPath));
             }
             catch (Exception ex)
@@ -221,6 +222,7 @@ namespace CasualtiesUnknown.SaveManager
                 // 否则槽位拷的是上一次进层的旧快照，回档会丢身上的物品。
                 GameSaveBridge.TrySaveGame();
                 string path = _store.AutoBackup(_cfg.AutoBackupKeep.Value);
+                ModLog.Flow("UI", "12", "自动备份完成 " + path + " keep=" + _cfg.AutoBackupKeep.Value);
                 ModLog.Info(I18n.F("fmt.auto_backup_done", System.IO.Path.GetFileName(path)));
             }
             catch (Exception ex)
@@ -264,7 +266,9 @@ namespace CasualtiesUnknown.SaveManager
                     return;
                 }
 
+                ModLog.Flow("UI", "21", "保存并退出：SaveSystem.SaveGame 完成");
                 _store.SaveManual(I18n.T("lbl.save_exit_alias"));
+                ModLog.Flow("UI", "22", "保存并退出：槽位已写入，回主菜单");
                 _window.ClosePanel();
                 PlayerCamera.main.ToMainMenu();
                 SetMessage(I18n.T("msg.save_exit_done"));
@@ -280,7 +284,10 @@ namespace CasualtiesUnknown.SaveManager
         {
             try
             {
+                ModLog.Flow("UI", "01", "切换槽位 " + slot.FullSlotPath + " sidecar=" + slot.Sidecar.Describe()
+                    + " mpRunning=" + MultiplayerBridge.IsMultiplayerRunning());
                 _store.RestoreSlotToSave(slot.FullSlotPath, _cfg.BackupBeforeOverwrite.Value);
+                ModLog.Flow("UI", "02", "切换槽位完成 " + slot.File.Name);
                 SetMessage(I18n.F("fmt.restored_to", slot.File.Name));
             }
             catch (Exception ex)

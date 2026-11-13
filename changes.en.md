@@ -2,6 +2,14 @@
 
 > 中文更新日志：见 [changes.md](changes.md)
 
+## 1.3.2
+
+Fixed rollback resetting the character to Experiment (Milky / Dune included).
+
+Fixed the "current save" card showing "no save" while in-game and right after loading.
+
+Added flow logging for Debug builds (load / rollback / save / slot switch / seed; not included in Release).
+
 ## 1.3.1
 
 Fixed the loaded character not following the save (Milky / Dune reset to Experiment).
