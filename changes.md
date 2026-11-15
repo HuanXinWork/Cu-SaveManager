@@ -2,6 +2,18 @@
 
 > English changelog: see [changes.en.md](changes.en.md)
 
+## 1.3.3
+
+联机读档不再摘除 Together 的 `PreRunScript.LoadRun` Prefix，改为按「会话是否运行中」条件放行：联机时由 Together 走完整的角色选择与逐玩家读档流程，本模组只在单机（联机 mod 在场但未开房）时接管。`StartRun` 仍保留原接管（联机模组那侧的 Prefix 只会在单机时硬拦、在联机时额外打开 Ready 大厅），新开局体验不变。
+
+修正对 HarmonyX 的误判：其 Prefix 返回值只汇总成「原方法是否执行」，不会阻止后续 Prefix 执行。因此 StartRun 不能靠 `return true` 放行，必须保持摘除；单机 LoadRun 会多一条联机模组的 “You can't play singleplayer” 提示，但世界已由本模组加载，不影响功能。
+
+新增进世界前的角色兜底（`Together.WorldMP.LoadVanillaGeneratedWorld`）：主机侧把存档角色同时写回 `PreRunScript.characterSelected` 与 `ScavPlayer.LocalPlayer.selectedCharacter`，避免被 Together 的 `PlayerCamera.Awake` 覆盖成 Experiment。角色只从本地玩家自己的 `mp_save/<persistentId>` 读取，不再使用「遍历任意子目录取第一个」的回退，避免把别人的物种读成自己的。
+
+新增读档补丁优先级自检：启动时打印 `LoadRun` / `StartRun` 上所有 Prefix 的执行顺序，排在联机模组之后会打警告。
+
+sidecar 新增 `character` 字段作为角色第二来源：主存档 `character` 为 0 而 sidecar 非 0 时采用 sidecar，采信前校验 RunId 一致，避免旧局 sidecar 盖掉新局角色。
+
 ## 1.3.2
 
 修复回档后角色被重置为 Experiment（Milky / Dune 同样生效）。

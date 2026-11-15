@@ -70,6 +70,12 @@ namespace CasualtiesUnknown.SaveManager
         /// <summary>本层激活的 LayerModifier 索引；-2=未记录（旧档/游戏未加载，回档时交给游戏自滚），-1=本层无词条，>=0=对应 modifierIndex。读档时由 ApplyLayerModifiersRestorePatch 还原。</summary>
         internal int ActiveLayerModifierIndex { get; set; } = -2;
 
+        // —— 角色物种双写 ——
+        //    主存档 save.sv 顶层 character 是唯一权威值，但它会被写坏（读档后 body 物种不匹配时再次保存就写成 0）。
+        //    sidecar 独立写入同一值，读档时作为主存档 character==0 的备选来源，挡住单次写坏导致的永久丢失。
+        //    -1 表示未记录（旧 sidecar）；0=Experiment / 1=Milky / 2=Dune。
+        internal int Character { get; set; } = -1;
+
         /// <summary>保存时存档内各玩家的身份（持久 ID / 玩家名 / Steam ID）；非多人槽或旧槽位为空列表。</summary>
         /// <remarks>回档时由 <see cref="MpPersistentIdMapper"/> 用来把旧持久 ID 映射到当前会话的持久 ID。</remarks>
         internal List<SlotMpPlayer> MpPlayers { get; set; } = new List<SlotMpPlayer>();
@@ -83,7 +89,8 @@ namespace CasualtiesUnknown.SaveManager
                 + " seed=" + QolSeed + " input='" + QolSeedInput + "'"
                 + " pos=" + pos + " posMode='" + PosMode + "'"
                 + " auto=" + IsAuto + " pinned=" + Pinned + " mp=" + IsMultiplayer
-                + " layerMod=" + ActiveLayerModifierIndex + " players=" + (MpPlayers?.Count ?? 0);
+                + " layerMod=" + ActiveLayerModifierIndex + " character=" + Character
+                + " players=" + (MpPlayers?.Count ?? 0);
         }
 
         /// <summary>
@@ -96,7 +103,7 @@ namespace CasualtiesUnknown.SaveManager
             try
             {
                 var p = SidecarPath(slotPath);
-                if (!File.Exists(p)) return new SlotSidecar();
+                if (string.IsNullOrEmpty(p) || !File.Exists(p)) return new SlotSidecar();
                 return Parse(File.ReadAllText(p, Encoding.UTF8));
             }
             catch
@@ -109,7 +116,9 @@ namespace CasualtiesUnknown.SaveManager
         {
             try
             {
-                File.WriteAllText(SidecarPath(slotPath), Serialize(), Encoding.UTF8);
+                var p = SidecarPath(slotPath);
+                if (string.IsNullOrEmpty(p)) return;
+                File.WriteAllText(p, Serialize(), Encoding.UTF8);
             }
             catch
             {
@@ -122,12 +131,14 @@ namespace CasualtiesUnknown.SaveManager
             try
             {
                 var p = SidecarPath(slotPath);
-                if (File.Exists(p)) File.Delete(p);
+                if (!string.IsNullOrEmpty(p) && File.Exists(p)) File.Delete(p);
             }
             catch { }
         }
 
-        internal static string SidecarPath(string slotPath) => slotPath + ".json";
+        /// <summary>sidecar 路径（主存档路径 + .json）；传入空路径时返回空字符串，调用方据此跳过读写。</summary>
+        internal static string SidecarPath(string slotPath)
+            => string.IsNullOrEmpty(slotPath) ? "" : slotPath + ".json";
 
         // —— 极简 JSON 序列化 —— //
 
@@ -153,6 +164,7 @@ namespace CasualtiesUnknown.SaveManager
             sb.Append("\"fixedY\":").Append(FixedY.ToString("R", System.Globalization.CultureInfo.InvariantCulture)).Append(',');
             sb.Append("\"isMultiplayer\":").Append(IsMultiplayer ? "true" : "false").Append(',');
             sb.Append("\"activeLayerModifierIndex\":").Append(ActiveLayerModifierIndex.ToString()).Append(',');
+            sb.Append("\"character\":").Append(Character.ToString()).Append(',');
             sb.Append("\"mpPlayerIds\":").Append(StringArray(MpPlayers, p => p.PersistentId)).Append(',');
             sb.Append("\"mpPlayerNames\":").Append(StringArray(MpPlayers, p => p.Name)).Append(',');
             sb.Append("\"mpPlayerSteamIds\":").Append(StringArray(MpPlayers, p => p.SteamId == 0UL
@@ -189,6 +201,8 @@ namespace CasualtiesUnknown.SaveManager
             int idx = ReadInt(text, "activeLayerModifierIndex");
             // 老 sidecar 没这字段：ReadInt 返 0；用 FindKey 区分"无字段"（-2 未记录）vs"显式值"
             s.ActiveLayerModifierIndex = FindKey(text, "activeLayerModifierIndex") < 0 ? -2 : idx;
+            // 同理：老 sidecar 没 character 字段时记为 -1（未记录），不参与读档兜底
+            s.Character = FindKey(text, "character") < 0 ? -1 : ReadInt(text, "character");
             s.MpPlayers = ReadMpPlayers(text);
             return s;
         }

@@ -20,7 +20,7 @@ namespace CasualtiesUnknown.SaveManager
         private const string PluginGuid = "com.casualtiesUnknown.saveManager";
         private const string QolGuid = "org.bepinex.plugins.qol_unknown";
         private const string PluginName = "CuSaveManager";
-        internal const string PluginVersion = "1.3.2";
+        internal const string PluginVersion = "1.3.3";
 
         private static ManualLogSource _log;
         private static Plugin _instance;
@@ -277,6 +277,36 @@ namespace CasualtiesUnknown.SaveManager
             {
                 SetMessage(I18n.F("fmt.save_exit_failed", ex.Message));
                 ModLog.Warning(ex.ToString());
+            }
+        }
+
+        /// <summary>游戏自带"保存并退出"写完 save.sv 后的补建槽位入口（Harmony Postfix 调用）。</summary>
+        internal static void OnGameSaveAndExit()
+        {
+            _instance?.SaveSlotForGameSaveExit();
+        }
+
+        private void SaveSlotForGameSaveExit()
+        {
+            try
+            {
+                if (MultiplayerBridge.IsMultiplayerRunning() && !MultiplayerBridge.IsServer())
+                {
+                    ModLog.Flow("UI", "31", "游戏保存并退出：客户端不建槽位");
+                    return;
+                }
+                if (!SaveStore.CurrentSaveExists())
+                {
+                    ModLog.Flow("UI", "31", "游戏保存并退出：没有 save.sv，跳过");
+                    return;
+                }
+                string path = _store.SaveManual(I18n.T("lbl.save_exit_alias"));
+                ModLog.Flow("UI", "32", "游戏保存并退出：已补建槽位 " + path);
+                SetMessage(I18n.F("fmt.saved_to", System.IO.Path.GetFileName(path), SaveStore.CurrentSaveDisplayPath));
+            }
+            catch (Exception ex)
+            {
+                ModLog.Warning($"游戏保存并退出建槽失败：{ex.Message}");
             }
         }
 

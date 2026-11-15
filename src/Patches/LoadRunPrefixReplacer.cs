@@ -1,27 +1,38 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Reflection;
+using System.Text;
 using CasualtiesUnknown.SaveManager.Interop;
 using HarmonyLib;
-using UnityEngine;
 
 namespace CasualtiesUnknown.SaveManager
 {
     /// <summary>
-    /// 接管 PreRunScript.LoadRun / StartRun：摘掉联机模组挂在这两个方法上的 Prefix 后由本模组决定读档/开局路径。
+    /// 接管 PreRunScript.LoadRun / StartRun：联机读档放行联机模组的原生流程，单机（联机 mod 在场但未开房）与联机新开局由本模组接管。
     /// </summary>
     /// <remarks>
-    /// 摘掉的补丁：owner 为 <see cref="MpHarmonySilencer.OwnerId"/>（CasualtiesMP）在 PreRunScript.LoadRun 与
-    /// PreRunScript.StartRun 上的 Prefix，对应补丁方法 Together.PreRunScript_LoadRun_MultiplayerPatch.Prefix 与
-    /// Together.PreRunScript_StartRun_MultiplayerPatch.Prefix；摘除失败时由 <see cref="MpHarmonySilencer"/> 在这两个
-    /// Prefix 方法上再挂 return false 的前缀兜底，两者都失败则原 Prefix 继续生效（联机模组原生读档/开局路径）。
-    /// 接管后的路径：
-    ///   · LoadRun 且联机运行中：客户端写状态日志并拦下；服务端还原本地玩家 sidecar 与固定世界种子后调
-    ///     Together.WorldMP.LoadVanillaGeneratedWorld(true)。
-    ///   · LoadRun 且联机未开：有存档同上走继续游戏（世界由 ContinueGameLoadPatch 按单机 save.sv 准备），无存档拦下。
-    ///   · StartRun 且联机运行中：客户端拦下；服务端调 Together.SavesystemPatch.DeleteMPSave() 清旧 mp_save 后调
-    ///     Together.WorldMP.LoadVanillaGeneratedWorld(false)。
-    ///   · StartRun 且联机未开：放行原版单机新局。
+    /// 为什么联机读档不再摘掉联机模组的 Prefix：
+    ///   · 联机模组（Together）在 PreRunScript.LoadRun 上挂的 Prefix 是多人读档的唯一入口，
+    ///     它内部的 CharacterSelectWait.SeedSavedCharacters / HostProceed 会恢复全员角色、重建物种、
+    ///     设置 SavesystemPatch.PendingLoadMpSave 并逐玩家读档。绕开它就会漏步骤（角色丢失、BodyToPlayerDict 为空）。
+    ///   · 联机模组在 Net.IsRunning == false 时同样 return false 硬拦单机读档，所以单机分支必须由本模组接管。
+    /// HarmonyX 的 Prefix 返回值只汇总成「原方法是否执行」，**不会**阻止后续 Prefix 执行
+    /// （HarmonyX 2.9 把所有 Prefix 都调完再统一判断）。因此：
+    ///   · LoadRun 的放行/接管只能控制原版方法，无法静默联机模组的多余提示——单机读档时会多一条
+    ///     “You can't play singleplayer with MP mod active”，但世界已由本模组加载，不影响功能。
+    ///   · StartRun 两边都不需要联机模组的 Prefix（单机时它硬拦、联机时它额外打开 Ready 大厅），
+    ///     所以对 StartRun 仍保留 Unpatch，摘不掉时由 MpHarmonySilencer 短路兜底。
+    /// Harmony 按 priority 降序执行 Prefix，本模组取 700：低于 ContinueGameLoadPatch（800，负责角色恢复），
+    /// 高于联机模组的默认 400，因此总能先完成自己的准备再让联机模组接着执行。
+    /// 分路结果：
+    ///   · LoadRun 且联机运行中：主机先补 Together 不处理的难度与世界种子，然后【放行】联机模组；
+    ///     客户端直接放行（由联机模组显示等待主机的状态）。
+    ///   · LoadRun 且联机未运行：有存档交给联机模组读世界，无存档拦下（避免空加载重掷身份）。
+    ///   · StartRun 且联机运行中：本模组【接管】——客户端拦下，主机清旧 mp_save 后直接生成世界。
+    ///     不放行是因为 Together 的新局分支会先进“准备”界面等全员 Ready，与本模组原有体验不一致；
+    ///     两边实际效果（DeleteMPSave + runSettings + LoadVanillaGeneratedWorld(false)）等价。
+    ///   · StartRun 且联机未运行：放行原版单机新局。
     ///   · 联机模组未启用（Together.Plugin.SUCCESFULLY_INITIALIZED 为 false 或 FORCE_DISABLE_MP_MOD 为 true）：全部放行原版。
     /// </remarks>
     internal static class LoadRunPrefixReplacer
@@ -29,10 +40,14 @@ namespace CasualtiesUnknown.SaveManager
         private const string ClientCannotStartMessage = "You can't start the game, server can.";
         private const string NoSaveMessage = "No save file to load.";
 
+        /// <summary>本模组 Prefix 的 Harmony 优先级：低于 ContinueGameLoadPatch（800），高于联机模组默认的 400。</summary>
+        private const int PatchPriority = 700;
+
         /// <summary>缓存解析到的 Together.SavesystemPatch.DeleteMPSave()；null 表示未解析到。</summary>
         private static bool _resolveTried;
         private static MethodInfo _mDeleteMpSave;
 
+        /// <summary>挂载两个 Prefix；已挂过时直接返回（主菜单每次 Start 都会重试）。</summary>
         internal static void TryPatch(Harmony harmony)
         {
             if (harmony == null)
@@ -51,21 +66,22 @@ namespace CasualtiesUnknown.SaveManager
 
                 MethodBase loadRun = AccessTools.Method(typeof(PreRunScript), "LoadRun");
                 MethodBase startRun = AccessTools.Method(typeof(PreRunScript), "StartRun");
-                bool loadRunDetached = UnpatchMpOwner(harmony, loadRun);
+
+                // StartRun 上联机模组的 Prefix 两边都不需要，直接摘；LoadRun 必须保留（联机读档放行）。
                 bool startRunDetached = UnpatchMpOwner(harmony, startRun);
-                MpHarmonySilencer.TrySilence(harmony, loadRunDetached, startRunDetached);
+                MpHarmonySilencer.TrySilence(harmony, startRunDetached);
 
                 bool loadRunPatched = PatchRunMethod(harmony, nameof(LoadRun_Prefix), loadRun);
                 bool startRunPatched = PatchRunMethod(harmony, nameof(StartRun_Prefix), startRun);
 
                 ModLog.Debug("LoadRunPrefixReplacer：目标 LoadRun=" + DescribeMethod(loadRun) + " StartRun=" + DescribeMethod(startRun)
-                    + "；Unpatch(owner=" + MpHarmonySilencer.OwnerId + ") LoadRun=" + (loadRunDetached ? "已摘净" : "仍有残留")
-                    + " StartRun=" + (startRunDetached ? "已摘净" : "仍有残留")
-                    + "；摘净后仍需短路=" + (!loadRunDetached || !startRunDetached)
+                    + "；priority=" + PatchPriority
+                    + "；Unpatch(owner=" + MpHarmonySilencer.OwnerId + ") StartRun=" + (startRunDetached ? "已摘净" : "仍有残留")
                     + "；本模组 Prefix LoadRun=" + (loadRunPatched ? "已挂上" : "未挂上")
                     + " StartRun=" + (startRunPatched ? "已挂上" : "未挂上"));
 
-                ModLog.Info("LoadRunPrefixReplacer：PreRunScript.LoadRun / StartRun 已接管");
+                LogPriorityOrder(loadRun, startRun);
+                ModLog.Info("LoadRunPrefixReplacer：联机读档放行原生流程，单机读档与联机开局由本模组接管");
             }
             catch (Exception ex)
             {
@@ -108,6 +124,7 @@ namespace CasualtiesUnknown.SaveManager
             return true;
         }
 
+        /// <summary>在目标方法上挂本模组的 Prefix；已存在同名同 owner 的 Prefix 时跳过。</summary>
         private static bool PatchRunMethod(Harmony harmony, string handlerName, MethodBase target)
         {
             if (target == null)
@@ -127,32 +144,60 @@ namespace CasualtiesUnknown.SaveManager
                 }
             }
 
-            harmony.Patch(target, prefix: new HarmonyMethod(typeof(LoadRunPrefixReplacer).GetMethod(
-                handlerName, BindingFlags.Static | BindingFlags.NonPublic)));
+            HarmonyMethod prefix = new HarmonyMethod(typeof(LoadRunPrefixReplacer).GetMethod(
+                handlerName, BindingFlags.Static | BindingFlags.NonPublic))
+            {
+                priority = PatchPriority,
+            };
+            harmony.Patch(target, prefix);
             return true;
+        }
+
+        /// <summary>
+        /// 输出每个目标方法的 Prefix 执行顺序，并断言本模组排在联机模组之前。
+        /// 联机模组若在后续版本调高自己的 Prefix 优先级，这里会在日志里第一时间暴露，而不是等玩家反馈读档失效。
+        /// </summary>
+        private static void LogPriorityOrder(MethodBase loadRun, MethodBase startRun)
+        {
+            CheckOne(loadRun, "LoadRun");
+            CheckOne(startRun, "StartRun");
+        }
+
+        private static void CheckOne(MethodBase method, string label)
+        {
+            Patches info = Harmony.GetPatchInfo(method);
+            if (info?.Prefixes == null || info.Prefixes.Count == 0)
+            {
+                return;
+            }
+
+            Patch[] ordered = info.Prefixes.OrderByDescending(p => p.priority).ToArray();
+            StringBuilder chain = new StringBuilder();
+            for (int i = 0; i < ordered.Length; i++)
+            {
+                if (i > 0) chain.Append(" > ");
+                chain.Append(ordered[i].owner).Append(':').Append(ordered[i].PatchMethod?.Name)
+                    .Append('(').Append(ordered[i].priority).Append(')');
+            }
+
+            ModLog.Info($"{label} Prefix 执行顺序：{chain}");
+
+            int mine = Array.FindIndex(ordered, p => p.owner != null
+                && p.owner.StartsWith("com.casualtiesUnknown.saveManager", StringComparison.Ordinal)
+                && p.PatchMethod != null && p.PatchMethod.Name.EndsWith("_Prefix", StringComparison.Ordinal));
+            int mp = Array.FindIndex(ordered, p => p.owner != null
+                && p.owner.StartsWith("CasualtiesMP", StringComparison.Ordinal));
+            if (mine >= 0 && mp >= 0 && mine > mp)
+            {
+                ModLog.Warning($"Harmony 排序异常：本模组 {label} Prefix 排在联机模组之后，原方法可能仍被对方的 return false 抑制");
+            }
         }
 
         /// <summary>Debug 构建下输出补丁目标的完整签名，便于比对联机模组版本变动；Release 中调用点被整体移除。</summary>
         private static string DescribeMethod(MethodBase method)
             => method == null ? "<未找到>" : method.DeclaringType?.FullName + "." + method.Name + "()";
 
-        /// <summary>解析 Together.SavesystemPatch.DeleteMPSave()；缺失时只关闭「新开联机局清旧 mp_save」这一项。</summary>
-        private static void ResolveMpHandles()
-        {
-            if (_resolveTried)
-            {
-                return;
-            }
-
-            _resolveTried = true;
-            Type type = TogetherReflection.FindType("SavesystemPatch");
-            if (type != null)
-            {
-                _mDeleteMpSave = InteropReflection.FindMethod(type, "DeleteMPSave");
-            }
-        }
-
-        private static bool LoadRun_Prefix()
+        private static bool LoadRun_Prefix(PreRunScript __instance)
         {
             if (!MultiplayerBridge.IsMultiplayerEnabled())
             {
@@ -160,59 +205,52 @@ namespace CasualtiesUnknown.SaveManager
                 return true;
             }
 
-            bool running = MultiplayerBridge.IsMultiplayerRunning();
-            bool server = MultiplayerBridge.IsServer();
-            bool hasSave = HasAnySaveFile();
-            ModLog.Flow("LoadRun", "20", "mp=true running=" + running + " server=" + server + " hasSave=" + hasSave);
-            ModLog.Info($"LoadRun_Prefix：mp=true netRunning={running} hasSave={hasSave}");
-
-            if (running)
+            if (MultiplayerBridge.IsMultiplayerRunning())
             {
-                if (!server)
+                // 联机：角色名册、逐玩家读档、物种重建全部交给联机模组的 Prefix（CharacterSelectWait）。
+                // 这里只补它不处理的两项，且只在主机侧做，随后放行。
+                if (MultiplayerBridge.IsServer())
                 {
-                    ModLog.Flow("LoadRun", "21", "联机运行且本端为客户端 → 拦截");
-                    StatusLog(ClientCannotStartMessage);
-                    return false;
+                    string mp = MpSaveLocator.ResolveLocalPlayerSavePath();
+                    ModLog.Flow("LoadRun", "22", "联机主机 → 前置注入后放行联机模组 path=" + (mp ?? "<none>"));
+                    RunSettingsBridge.RestoreFromSaveFile(mp);
+                    RestoreMpWorldSeed();
+                }
+                else
+                {
+                    ModLog.Flow("LoadRun", "22", "联机客户端 → 放行联机模组（等待主机继续）");
                 }
 
-                ModLog.Flow("LoadRun", "22", "联机运行且本端为主机 → ContinueLoadedRun（mp_save）");
-                return ContinueLoadedRun();
+                return true;
             }
 
+            bool hasSave = HasAnySaveFile();
+            ModLog.Flow("LoadRun", "24", "联机未运行 → 本模组接管单机读档 hasSave=" + hasSave);
             if (!hasSave)
             {
-                ModLog.Flow("LoadRun", "23", "未运行且没有单机 save.sv → 拦截（避免空加载重掷身份）");
-                ModLog.Info("LoadRun_Prefix：联机启用但未运行且没有单机 save.sv → 拦截读档（游戏会当作新局重掷身份）");
+                ModLog.Flow("LoadRun", "23", "未运行且没有可用存档 → 拦截（避免空加载重掷身份）");
                 StatusLog(NoSaveMessage);
                 return false;
             }
 
-            ModLog.Flow("LoadRun", "24", "未运行但单机有存档 → ContinueLoadedRun（save.sv）");
             return ContinueLoadedRun();
         }
 
-        /// <summary>读档分支：联机主机按本地玩家 mp_save 恢复联机状态；单机只让 Together 读根目录 save.sv。</summary>
+        /// <summary>单机续玩：世界已按 save.sv + sidecar 准备，这里只让联机模组把世界加载起来。</summary>
         private static bool ContinueLoadedRun()
         {
-            if (MultiplayerBridge.IsMultiplayerRunning())
-            {
-                string mp = MpSaveLocator.ResolveLocalPlayerSavePath();
-                ModLog.Flow("LoadRun", "30", "联机续玩：本地档=" + (mp ?? "<none>") + " sidecar=" + SlotSidecar.LoadOrEmpty(mp).Describe());
-                // Together 不恢复 runSettings / 世界引擎 / 种子，由本模组按本地玩家 mp_save 补齐。
-                RunSettingsBridge.RestoreFromSaveFile(mp);
-                RestoreMpWorldSeed();
-            }
-            else
-            {
-                ModLog.Flow("LoadRun", "30", "单机续玩：世界已按 save.sv + sidecar 准备，不再读 mp_save");
-            }
-
+            ModLog.Flow("LoadRun", "30", "单机续玩：世界已按 save.sv + sidecar 准备，不再读 mp_save");
             bool ok = MultiplayerBridge.TryLoadMultiplayerContinue(loadsave: true);
             ModLog.Flow("LoadRun", "31", "Together 读档调用 ok=" + ok + " loadedRun=" + SaveSystem.loadedRun);
             return false;
         }
 
-        /// <summary>新开联机局：清掉旧 mp_save 后走联机模组的无存档世界生成；联机未开时放行原版 StartRun。</summary>
+        /// <summary>联机新开一局：客户端拦下，主机清旧 mp_save 后按菜单预设生成世界。</summary>
+        /// <remarks>
+        /// 这里保留接管而不是放行：Together 的 HostProceed 新局分支会先进“准备”界面等全员 Ready，
+        /// 与本模组原本“点开始就进世界”的体验不一致；两边的实际效果（DeleteMPSave + runSettings + 
+        /// LoadVanillaGeneratedWorld(false)）等价，所以继续由本模组直接调用。
+        /// </remarks>
         private static bool StartRun_Prefix(PreRunScript __instance)
         {
             if (!MultiplayerBridge.IsMultiplayerEnabled())
@@ -236,7 +274,6 @@ namespace CasualtiesUnknown.SaveManager
 
             ModLog.Flow("StartRun", "03", "主机开新局：清旧 mp_save 后 LoadVanillaGeneratedWorld(false)");
             DeleteMpSave();
-            ModLog.Info("StartRun：联机运行中，走 Together.WorldMP.LoadVanillaGeneratedWorld(false)");
             SaveSystem.loadedRun = false;
             if (__instance != null && __instance.runSettings != null)
             {
@@ -247,6 +284,22 @@ namespace CasualtiesUnknown.SaveManager
             bool ok = MultiplayerBridge.TryLoadMultiplayerContinue(loadsave: false);
             ModLog.Flow("StartRun", "05", "Together 新局调用 ok=" + ok + " loadedRun=" + SaveSystem.loadedRun);
             return false;
+        }
+
+        /// <summary>解析 Together.SavesystemPatch.DeleteMPSave()；缺失时只关闭「新开联机局清旧 mp_save」这一项。</summary>
+        private static void ResolveMpHandles()
+        {
+            if (_resolveTried)
+            {
+                return;
+            }
+
+            _resolveTried = true;
+            Type type = TogetherReflection.FindType("SavesystemPatch");
+            if (type != null)
+            {
+                _mDeleteMpSave = InteropReflection.FindMethod(type, "DeleteMPSave");
+            }
         }
 
         /// <summary>调 Together.SavesystemPatch.DeleteMPSave()；缺失时记一次警告并保留旧 mp_save。</summary>
@@ -275,7 +328,7 @@ namespace CasualtiesUnknown.SaveManager
             {
                 string mp = MpSaveLocator.ResolveLocalPlayerSavePath();
                 SlotSidecar sidecar = SlotSidecar.LoadOrEmpty(mp);
-                ModLog.Flow("StartRun", "10", "联机续玩 sidecar: path=" + (mp ?? "<none>") + " " + sidecar.Describe());
+                ModLog.Flow("LoadRun", "10", "联机续玩 sidecar: path=" + (mp ?? "<none>") + " " + sidecar.Describe());
                 WorldEngineArbiter.PrepareMpRollback(sidecar);
                 ModLog.Info($"多人续玩：还原世界引擎/种子 engine='{sidecar.WorldEngine}' seed={sidecar.QolSeed}");
             }

@@ -2,6 +2,18 @@
 
 > 中文更新日志：见 [changes.md](changes.md)
 
+## 1.3.3
+
+Multiplayer loading no longer unpatches Together's `PreRunScript.LoadRun` prefix. It now gates on "is a session running": while connected, Together runs its full character-selection and per-player load flow; this mod only takes over in single-player (multiplayer mod loaded, no session). `StartRun` keeps the old takeover (Together's prefix there only hard-blocks single-player and opens an extra Ready lobby when connected), so starting a new run feels unchanged.
+
+Corrected a wrong assumption about HarmonyX: a prefix's return value only aggregates into "run the original or not" and does **not** stop later prefixes. So StartRun cannot be released with `return true` and must stay detached; single-player LoadRun now shows one extra "You can't play singleplayer" notice from the multiplayer mod, but the world is already being loaded by this mod.
+
+Added a pre-world-load character fallback (`Together.WorldMP.LoadVanillaGeneratedWorld`): on the host it writes the saved character to both `PreRunScript.characterSelected` and `ScavPlayer.LocalPlayer.selectedCharacter`, so Together's `PlayerCamera.Awake` can no longer overwrite it back to Experiment. The character is read only from the local player's own `mp_save/<persistentId>`; the old "first subdirectory that has a save" fallback is no longer used for identity, so another player's species cannot be picked up.
+
+Added a load-patch priority self-check: the prefix execution order for `LoadRun` / `StartRun` is printed at startup, with a warning if this mod ends up behind the multiplayer mod.
+
+Added a `character` field to the sidecar as a second source: when the main save says 0 but the sidecar says otherwise, the sidecar wins, but only if both belong to the same run (matching RunId), so a stale sidecar cannot override a newer run.
+
 ## 1.3.2
 
 Fixed rollback resetting the character to Experiment (Milky / Dune included).

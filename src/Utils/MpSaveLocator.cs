@@ -69,6 +69,26 @@ namespace CasualtiesUnknown.SaveManager
             return null;
         }
 
+        /// <summary>只按本地玩家自己的持久 ID 定位 save.sv；持久 ID 未知或文件不存在时返回 null。</summary>
+        /// <remarks>
+        /// 与 <see cref="ResolveLocalPlayerSavePath"/> 的区别：不做“遍历任意子目录取第一个”的兑底。
+        /// 角色/身份类读取必须用这个，否则主机可能把其他玩家的物种读成自己的。
+        /// </remarks>
+        internal static string ResolveOwnSavePath()
+        {
+            try
+            {
+                string id = MultiplayerBridge.GetLocalPersistentId();
+                if (string.IsNullOrEmpty(id)) return null;
+                string p = Path.Combine(MpSaveDir, id, "save.sv");
+                return File.Exists(p) ? p : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         /// <summary>mp_save 下的玩家子目录名（即联机模组的持久 ID）；目录不存在时返回空列表。</summary>
         internal static List<string> ListPersistentIdDirs()
         {

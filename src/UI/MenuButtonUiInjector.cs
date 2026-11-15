@@ -17,7 +17,6 @@ namespace CasualtiesUnknown.SaveManager
     internal static class MenuButtonUiInjector
     {
         private const string InjectedName = "SaveManager_MenuButton";
-
         private static Action _onClick;
         private static Harmony _harmony;
         /// <summary>注入后的按钮 RectTransform；patch AdaptiveButton.overlayActive 时用来判断鼠标是否在按钮上以阻穿透。</summary>
@@ -54,6 +53,15 @@ namespace CasualtiesUnknown.SaveManager
                 ModLog.Warning($"LoadRunPrefixReplacer.TryPatch 失败：{ex.Message}");
             }
 
+            try
+            {
+                MpCharacterRestore.TryPatch();
+            }
+            catch (Exception ex)
+            {
+                ModLog.Warning($"MpCharacterRestore.TryPatch 失败：{ex.Message}");
+            }
+
             // 联机模组同时 patch PreRunScript.Start 与 sceneLoaded，
             // 这里订阅 sceneLoaded 是兜底，保证场景重载时仍能注入。
             SceneManager.sceneLoaded += OnSceneLoaded;
@@ -68,6 +76,7 @@ namespace CasualtiesUnknown.SaveManager
             try { SceneManager.sceneLoaded -= OnSceneLoaded; } catch { }
             try { _harmony?.UnpatchSelf(); } catch { }
             _harmony = null;
+            InjectedRect = null;
         }
 
         private static void OnSceneLoaded(Scene scene, LoadSceneMode mode)
@@ -86,6 +95,7 @@ namespace CasualtiesUnknown.SaveManager
                 // 回到主菜单时重试：世界生成层首次挂载如有目标缺失，这里补齐（已挂载的目标会去重）。
                 SeededWorldPatcher.TryPatch(_harmony);
                 LoadRunPrefixReplacer.TryPatch(_harmony);
+                MpCharacterRestore.TryPatch();
                 InjectOnce(pre);
             }
             catch (Exception ex)
@@ -145,8 +155,6 @@ namespace CasualtiesUnknown.SaveManager
 
             ReplaceAllTexts(clone, I18n.T("app.menu_button"));
 
-            ReplaceAllTexts(clone, I18n.T("app.menu_button"));
-
             // 位置：屏幕顶部正中（避开屏幕中下方主菜单 5 个 AdaptiveButton；
             // 避开左上角的语言选择控件 + 右上角版本号）。
             var rt = clone.GetComponent<RectTransform>();
@@ -170,7 +178,6 @@ namespace CasualtiesUnknown.SaveManager
             try { _onClick?.Invoke(); }
             catch (Exception ex) { ModLog.Warning($"存档管理按钮点击异常：{ex.Message}"); }
         }
-
         /// <summary>
         /// 销毁克隆按钮里所有 Localizer / Tooltip 组件。
         /// UILocalizer 会反复把按钮文字覆盖回原版；UITooltip 会让悬停显示原版"继续前进"提示。

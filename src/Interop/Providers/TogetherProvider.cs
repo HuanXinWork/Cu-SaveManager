@@ -644,6 +644,40 @@ namespace CasualtiesUnknown.SaveManager.Interop
             return invoked;
         }
 
+        /// <summary>把角色写回联机模组的本地玩家（Together.ScavPlayer.selectedCharacter）。</summary>
+        /// <remarks>
+        /// Together 在 PlayerCamera.Awake 前会用 ScavPlayer.LocalPlayer.selectedCharacter 覆盖 PreRunScript.characterSelected，
+        /// 只写后者会被盖回默认值，所以读档兜底必须两边一起写。
+        /// 本地玩家尚未建立（未连上 / 已离开）或成员缺失时返回 false，由调用方决定是否只写 PreRunScript。
+        /// 取值 0=Experiment / 1=Milky / 2=Dune；目标的实际字段类型是 byte，这里显式转换后再写入。
+        /// </remarks>
+        internal bool TryApplyCharacterToLocalPlayer(int character)
+        {
+            EnsureResolved();
+            object local = InteropReflection.ReadMember(_scavLocalPlayer, null);
+            if (local == null)
+            {
+                ModLog.Debug("TryApplyCharacterToLocalPlayer：Together.ScavPlayer.LocalPlayer 不可用，跳过");
+                return false;
+            }
+
+            MemberInfo member = InteropReflection.FindField(local.GetType(), "selectedCharacter");
+            if (member == null)
+            {
+                InteropDiagnostics.WarnOnce("TogetherProvider.selectedCharacter",
+                    "Together.ScavPlayer.selectedCharacter 未解析到，读档角色兜底只能写 PreRunScript（可能被 Together 覆盖回默认角色）");
+                return false;
+            }
+
+            if (!InteropReflection.TryWriteMember(member, local, (byte)character))
+            {
+                ModLog.Warning("TryApplyCharacterToLocalPlayer：写入 ScavPlayer.selectedCharacter 失败");
+                return false;
+            }
+
+            return true;
+        }
+
         /// <summary>把一条状态消息写进联机模组的日志；对应 Together.Multiplayer.DoMultiplayerStatusMessageLog(string)。</summary>
         internal bool TryLogStatusMessage(string message)
         {

@@ -375,6 +375,7 @@ namespace CasualtiesUnknown.SaveManager
                 FixedY = WorldEngineArbiter.FixedY,
                 IsMultiplayer = ShouldUseMpSave(),
                 ActiveLayerModifierIndex = ctx.ActiveLayerModifierIndex,
+                Character = ctx.Character,
             };
             if (sidecar.IsMultiplayer) MpPersistentIdMapper.CaptureForSlot(sidecar);
             return sidecar;
@@ -578,6 +579,7 @@ namespace CasualtiesUnknown.SaveManager
                 sc.FixedX = WorldEngineArbiter.FixedX;
                 sc.FixedY = WorldEngineArbiter.FixedY;
                 sc.ActiveLayerModifierIndex = ctx.ActiveLayerModifierIndex;
+                if (ctx.Character >= 0) sc.Character = ctx.Character;
                 sc.LastPlayedAtUnixMs = DateTimeOffset.Now.ToUnixTimeMilliseconds();
                 sc.Save(sv);
                 ModLog.Info($"多人续玩种子持久化：path={sv} seed={sc.QolSeed} engine={sc.WorldEngine} firstSeed={firstSeed}");
@@ -637,6 +639,7 @@ namespace CasualtiesUnknown.SaveManager
                 && sidecar.FixedX == 0f
                 && sidecar.FixedY == 0f
                 && !sidecar.IsMultiplayer
+                && sidecar.Character < 0
                 && string.IsNullOrEmpty(sidecar.Nickname);
         }
 
@@ -843,6 +846,38 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
+        /// <summary>读存档角色，主存档读不到或为 0 时用同路径 sidecar 的 character 兑底。</summary>
+        /// <remarks>
+        /// 主存档的 character 是权威值，但它可能被写坏：读档后 body 物种与 charType 不一致时再次保存就会写 0（Experiment），
+        /// 之后所有读档路径都只能读回 0。sidecar 是独立写入路径，同一值另存一份，
+        /// 因此主存档为 0 且 sidecar 非 0 时优先采用 sidecar（旧 sidecar 无此字段时值为 -1，不参与兑底）。
+        /// 采信条件：sidecar 必须属于同一局（RunId 一致；任一方为 0 视为未知不拦），避免旧局 sidecar 盖掉新局角色。
+        /// 主存档非 0 时一律以主存档为准，避免 sidecar 滞后覆盖玩家的主动改选。
+        /// </remarks>
+        internal static int? TryReadCharacterWithSidecar(string fullPath)
+        {
+            int? fromSave = TryReadCharacterFromSv(fullPath);
+            if (fromSave.HasValue && fromSave.Value > 0) return fromSave;
+            if (string.IsNullOrEmpty(fullPath)) return fromSave;
+
+            SlotSidecar sidecar = SlotSidecar.LoadOrEmpty(fullPath);
+            if (sidecar.Character < 0) return fromSave;
+
+            int runIdFromSave = ReadRunIdFromSv(fullPath);
+            if (sidecar.RunId != 0 && runIdFromSave != 0 && sidecar.RunId != runIdFromSave)
+            {
+                ModLog.Info($"角色兑底跳过：sidecar RunId={sidecar.RunId} 与存档 RunId={runIdFromSave} 不一致");
+                return fromSave;
+            }
+
+            if (!fromSave.HasValue || fromSave.Value != sidecar.Character)
+            {
+                ModLog.Info($"读档角色兑底：主存档 character={fromSave?.ToString() ?? "?"} sidecar={sidecar.Character}，采用 sidecar path={fullPath}");
+            }
+
+            return sidecar.Character;
+        }
+
         /// <summary>
         /// SaveGame 写入 biome=biomeDepth+1，TryLoadGame 直接赋给 biomeDepth。
         /// 槽位/sidecar 统一存 0-based biomeDepth；从刚写完的 save.sv 解读，避免层间过渡时内存 depth 已递增。
@@ -877,6 +912,7 @@ namespace CasualtiesUnknown.SaveManager
             {
                 int depth = BiomeDepthFromSaveFile(sv);
                 ctx.Biome = depth;
+                if (ctx.Character < 0) ctx.Character = TryReadCharacterFromSv(sv) ?? -1;
                 int traveled = MpSaveLayerHelper.ReadTotalTraveledFromSv(sv);
                 ModLog.Info($"存档层数：path={sv} biomeDepth={depth} totalTraveled={traveled} rawBiome={ReadBiomeFromSv(sv)} liveDepth={WorldGeneration.world?.biomeDepth}");
                 // qol 引擎下实时种子为 0（世界未经本模组钩子播种）时，按 QoL 同源规则
@@ -1150,6 +1186,7 @@ namespace CasualtiesUnknown.SaveManager
             int biome = 0;
             float px = 0f, py = 0f;
             bool hasPos = false;
+            int character = -1;
             try
             {
                 if (WorldGeneration.world != null) biome = WorldGeneration.world.biomeDepth;
@@ -1164,6 +1201,7 @@ namespace CasualtiesUnknown.SaveManager
                     px = p.x;
                     py = p.y;
                     hasPos = true;
+                    character = cam.body.charType;
                 }
             }
             catch { }
@@ -1184,6 +1222,7 @@ namespace CasualtiesUnknown.SaveManager
                 QolSeedInput = qolInput,
                 WorldEngine = ResolveCurrentPreferredEngineName(),
                 ActiveLayerModifierIndex = LayerModifierSnapshot.CurrentActiveIndex(),
+                Character = character,
             };
             ModLog.Flow("Snapshot", "01", "biome=" + ctx.Biome + " runId=" + ctx.RunId
                 + " pos=" + (ctx.HasPlayerPos ? "(" + ctx.PlayerX.ToString("0.0") + "," + ctx.PlayerY.ToString("0.0") + ")" : "none")
@@ -1203,6 +1242,8 @@ namespace CasualtiesUnknown.SaveManager
             public string QolSeedInput;
             public string WorldEngine;
             public int ActiveLayerModifierIndex;
+            /// <summary>快照时玩家角色（0=Experiment / 1=Milky / 2=Dune）；-1 表示读取不到（游戏未进世界）。</summary>
+            public int Character;
         }
 
         private static string ResolveSlotsRoot()
