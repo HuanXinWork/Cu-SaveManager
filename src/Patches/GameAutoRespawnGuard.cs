@@ -19,10 +19,7 @@ namespace CasualtiesUnknown.SaveManager
         }
     }
 
-    /// <summary>
-    /// 死亡感知或回档执行期间阻断非回档发起的 <c>PlayerCamera.ToMainMenu</c> 自动退回主菜单。
-    /// 必须先于 <c>CasualtiesMP</c> 的同名 Prefix 执行，防止全灭读秒回档前联机模组抢先注销网络实体并向客机广播 <c>CLIENT_GoBackToMainMenu</c>。
-    /// </summary>
+    /// <summary>死亡感知或回档期间先于 <c>CasualtiesMP</c> 拦截非回档 <c>PlayerCamera.ToMainMenu</c>，防止联机模组抢先注销网络实体并广播全员退房。</summary>
     [HarmonyPatch(typeof(PlayerCamera), "ToMainMenu")]
     [HarmonyPriority(Priority.First)]
     [HarmonyBefore("CasualtiesMP")]

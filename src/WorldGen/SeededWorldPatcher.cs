@@ -24,6 +24,13 @@ namespace CasualtiesUnknown.SaveManager
         private static int _distributeEntitiesCallIndex;
         private static int _placeCrystalsCallIndex;
 
+        private static void ResetGenerationCounters()
+        {
+            _noiseGenStep = 0;
+            _distributeEntitiesCallIndex = 0;
+            _placeCrystalsCallIndex = 0;
+        }
+
         private static readonly (string method, int offset)[] CoroutinePhases =
         {
             ("InstantiateWorld", 500),
@@ -301,6 +308,7 @@ namespace CasualtiesUnknown.SaveManager
 
         private static void Start_Prefix()
         {
+            ResetGenerationCounters();
             TogetherModHooksBridge.TryBindAll();
             QolSpawnSuppressor.TryPatch();
             QolTrapClearGuard.TryPatch();
@@ -333,10 +341,13 @@ namespace CasualtiesUnknown.SaveManager
 
         private static void CoroutinePhase_Postfix(MethodBase __originalMethod, ref IEnumerator __result)
         {
-            if (!On || __result == null || __originalMethod == null) return;
+            // 不在此处早退 !On：联机第 0 层创建枚举器时尚未收齐种子包，须由 MoveNext 每步动态判定 On。
+            if (__result == null || __originalMethod == null) return;
             string name = __originalMethod.Name;
-            bool resetNoise = name == "GenerateWorld" || name == "WorldGenerateTerrain";
-            bool resetSub = name == "GenerateWorld";
+            // 联机 GenerateWorld 被替换为 Together 外层握手协程，包装其枚举器会在 finally 中回滚刚同步的 Random.state。
+            if (name == "GenerateWorld" && MultiplayerBridge.IsMultiplayerRunning()) return;
+            bool resetNoise = name == "GenerateWorld" || name == "WorldPreprocess" || name == "WorldGenerateTerrain";
+            bool resetSub = name == "GenerateWorld" || name == "WorldPreprocess";
             __result = new SeededPhaseEnumerator(__result, CoroutineStageOffset(name), resetNoise, resetSub);
         }
 
@@ -419,9 +430,7 @@ namespace CasualtiesUnknown.SaveManager
         {
             if (On)
             {
-                _noiseGenStep = 0;
-                _distributeEntitiesCallIndex = 0;
-                _placeCrystalsCallIndex = 0;
+                ResetGenerationCounters();
             }
         }
 
@@ -429,9 +438,7 @@ namespace CasualtiesUnknown.SaveManager
         {
             if (On)
             {
-                _noiseGenStep = 0;
-                _distributeEntitiesCallIndex = 0;
-                _placeCrystalsCallIndex = 0;
+                ResetGenerationCounters();
             }
         }
 

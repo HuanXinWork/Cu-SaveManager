@@ -135,11 +135,7 @@ namespace CasualtiesUnknown.SaveManager
             _bindResolved = false;
         }
 
-        /// <summary>
-        /// 可选对接 <c>Together.Api.TogetherPanelApi</c> 外部输入阻塞锁：
-        /// 解决局内打开存档面板（或嵌入其中的 <c>SkinSync</c> 子页签）时打字或点击穿透触发 Together 交互快捷键的问题；
-        /// 原版 <c>v5.5.3.0</c> 与普通版 <c>main</c> 不含该类时静默跳过。
-        /// </summary>
+        /// <summary>可选注册 <c>TogetherPanelApi</c> 外部输入阻塞锁，抑制面板激活期间穿透触发 Together 局内热键（旧版无此类型时静默跳过）。</summary>
         private static void BindExternalInputBlocker(Assembly asm)
         {
             Type panelApiType = InteropReflection.FindType(asm, "Together.Api.TogetherPanelApi");
@@ -254,12 +250,7 @@ namespace CasualtiesUnknown.SaveManager
         private static MemberInfo FindStaticMember(Type type, string name)
             => (MemberInfo)InteropReflection.FindProperty(type, name) ?? InteropReflection.FindField(type, name);
 
-        /// <summary>
-        /// 向 Feature 版 <c>Together.ModHooks.CustomWorldSeedProvider</c> 提供未叠加层偏移的基础种子：
-        /// 层偏移 <c>+ traveled * 265443576</c> 由宿主在快照 <c>firstworldgenparams</c> 前统一计算，
-        /// 同时基础种子随 <c>Server_AnnounceSeed</c> 发往客机，与原版/<c>main</c> 的 <c>MpWorldSeedInjector</c> + <c>MpSeedBroadcast</c> 语义严格对齐，
-        /// 避免全目录扫描 <c>mp_save/</c> 误读历史孤儿玩家存档或污染运行期 <c>world.totalTraveled</c>。
-        /// </summary>
+        /// <summary>向 <c>ModHooks.CustomWorldSeedProvider</c> 提供未加层偏移的基础种子；层偏移由宿主在快照 <c>firstworldgenparams</c> 前统一计算。</summary>
         private static int? ProvideCustomWorldSeed()
         {
             if (WorldEngineArbiter.Current == WorldEngine.Krok

@@ -90,10 +90,7 @@ namespace CasualtiesUnknown.SaveManager
         }
     }
 
-    /// <summary>
-    /// 面板阻挡期间拦截 <c>PlayerCamera.HandleMouseOver</c> 与 <c>HandleDragging</c>，
-    /// 清除已有拖拽引用，防止局内点击存档面板（或嵌入其中的 <c>SkinSync</c> 子页签）时误悬停或拖拽地面物品。
-    /// </summary>
+    /// <summary>面板阻挡期间拦截 <c>PlayerCamera.HandleMouseOver</c> 与 <c>HandleDragging</c>，并清理悬停框与拖拽残留状态。</summary>
     [HarmonyPatch]
     internal static class PlayerCameraMouseGuard
     {
@@ -113,6 +110,8 @@ namespace CasualtiesUnknown.SaveManager
             if (__instance != null)
             {
                 __instance.dragItem = null;
+                if (__instance.hoverSquare != null) __instance.hoverSquare.enabled = false;
+                if (__instance.dragImage != null) __instance.dragImage.enabled = false;
             }
             return false;
         }
