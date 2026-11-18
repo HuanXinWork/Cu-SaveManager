@@ -1,52 +1,69 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
-using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// 多人回档位置写回：对齐单机 SelfSpawnPatcher（FinishWorldGeneration Postfix 最后写回）。
-    /// 不订阅联机模组的世界生成完成事件（会拖长其协程）；改挂 WorldGeneration.FinishWorldGeneration 的 Harmony Postfix，
-    /// 再经 MpRollbackRunner 等到 CasualtiesTogetherUtils.Util.IsWorldGenerated() 为真后才写回玩家位置。
-    /// </summary>
+    /// <summary>多人回档玩家坐标恢复：在 FinishWorldGeneration 协程跑完后按 persistentId 跟踪并持续还原主客端位置。</summary>
     internal static class MpPositionRestorer
     {
-        private static bool _harmonyPatched;
+        // 给 ModHooks.SpawnPositionOverride 预留短暂窗口，超时仍未全员恢复则无缝回退至本地写回 + Server_TeleportCharacter 兜底。
+        private const float HookFallbackDelaySeconds = 1.5f;
+
         private static bool _activeSession;
+        private static int _sessionId;
         private static Dictionary<string, Vector2> _pending;
+        private static HashSet<string> _restored;
 
         internal static bool ActiveSession => _activeSession;
 
+        /// <summary>挂载多人晚出生抑制或绑定 Together.ModHooks 精确坐标钩子。</summary>
         internal static void TryPatchHarmony()
         {
-            if (_harmonyPatched) return;
-            try
-            {
-                var harmony = new Harmony("com.casualtiesUnknown.saveManager.mpPosition");
-                var finish = AccessTools.Method(typeof(WorldGeneration), "FinishWorldGeneration");
+            TogetherModHooksBridge.TryBindAll();
+            MpLateSpawnSuppressor.TryPatch();
+        }
 
-                if (finish != null)
-                {
-                    harmony.Patch(finish, postfix: new HarmonyMethod(typeof(MpPositionFinishPatch), nameof(MpPositionFinishPatch.Postfix)));
-                }
-                MpLateSpawnSuppressor.TryPatch();
-                _harmonyPatched = true;
-                ModLog.Info("多人回档位置写回已挂载（FinishWorldGeneration Postfix）");
-            }
-            catch (Exception ex)
-            {
-                ModLog.Warning($"MpPositionRestorer.TryPatchHarmony 失败：{ex.Message}");
-            }
+        internal static void CancelSession()
+        {
+            _sessionId++;
+            _activeSession = false;
+            _pending = null;
+            _restored = null;
+            TogetherModHooksBridge.SetRestoreSavedPositions(false);
+        }
+
+        internal static Vector2? TryResolveHookPosition(string persistentId)
+        {
+            if (!_activeSession || _pending == null || string.IsNullOrEmpty(persistentId))
+                return null;
+            if (!_pending.TryGetValue(persistentId, out Vector2 pos))
+                return null;
+            _restored?.Add(persistentId);
+            ModLog.Info($"多人回档 ModHooks.SpawnPositionOverride：{persistentId} → ({pos.x:0.0},{pos.y:0.0})");
+            return pos;
         }
 
         internal static void PrepareForRollback(SlotSidecar sidecar)
         {
+            TryPatchHarmony();
+
+            if (IsCrossLayerBoundarySave())
+            {
+                CancelSession();
+                ModLog.Info("多人回档：mp_rules LEVEL=false（跨层进层槽），跳过上一层出口 PLRPOS 坐标还原");
+                return;
+            }
+
             var positions = ReadPlrPosFromMpRules();
             if (positions.Count == 0)
+            {
                 ModLog.Warning("多人回档：mp_rules 无 PLRPOS，仅尝试 sidecar 主机坐标");
+            }
 
             if (sidecar != null && !MultiplayerBridge.IsDedicatedServer())
             {
@@ -56,9 +73,9 @@ namespace CasualtiesUnknown.SaveManager
                     string hostId = MultiplayerBridge.GetLocalPersistentId();
                     if (string.IsNullOrEmpty(hostId))
                     {
-                        foreach (var k in positions.Keys) { hostId = k; break; }
+                        ModLog.Warning("多人回档：本地主机 persistentId 为空，跳过 sidecar 主机坐标覆盖");
                     }
-                    if (!string.IsNullOrEmpty(hostId))
+                    else
                     {
                         positions[hostId] = hostPos.Value;
                         ModLog.Info($"多人回档：sidecar 覆盖主机 {hostId} ({hostPos.Value.x:0.0},{hostPos.Value.y:0.0})");
@@ -67,63 +84,175 @@ namespace CasualtiesUnknown.SaveManager
             }
             else if (MultiplayerBridge.IsDedicatedServer())
             {
-                ModLog.Info("多人回档：Dedicated Server跳过sidecar主机坐标");
+                ModLog.Info("多人回档：专用服务端跳过 sidecar 主机坐标");
             }
 
             if (positions.Count == 0)
             {
+                CancelSession();
                 ModLog.Warning("多人回档：无可恢复的玩家坐标");
                 return;
             }
 
+            _sessionId++;
             _pending = positions;
+            _restored = new HashSet<string>(StringComparer.Ordinal);
             _activeSession = true;
+            TogetherModHooksBridge.SetRestoreSavedPositions(true);
             ModLog.Info($"多人回档：已缓存 {positions.Count} 名玩家位置");
             foreach (var kv in positions)
+            {
                 ModLog.Info($"  PLRPOS {kv.Key} = ({kv.Value.x:0.0},{kv.Value.y:0.0})");
+            }
         }
 
-        /// <summary>
-        /// 挂载到 FinishWorldGeneration Postfix 中调用，尝试写回玩家位置.
-        /// </summary>
+        private static bool IsCrossLayerBoundarySave()
+        {
+            try
+            {
+                if (!File.Exists(MpSaveLocator.MpRulesPath)) return false;
+                string json = File.ReadAllText(MpSaveLocator.MpRulesPath, System.Text.Encoding.UTF8);
+                return MpRulesJson.TryReadBool(json, MpRulesJson.LevelField, out bool midLevel) && !midLevel;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         internal static void ApplyAfterFinishWorldGen()
         {
             if (!_activeSession || _pending == null || _pending.Count == 0) return;
-            TryApplyOnce();
-            void EndSession()
+
+            int capturedSession = _sessionId;
+            if (TogetherModHooksBridge.HasSpawnPositionHook)
             {
-                _activeSession = false;
-                _pending = null;
+                var hookRunner = MpRollbackRunner.Instance;
+                if (hookRunner != null)
+                {
+                    float fallbackAt = -1f;
+                    bool fallbackActivated = false;
+                    hookRunner.RunPositionRestoreWindow(
+                        () =>
+                        {
+                            if (_sessionId != capturedSession || !_activeSession || _pending == null)
+                                return true;
+                            if (_restored != null && _restored.Count >= _pending.Count)
+                                return true;
+
+                            if (fallbackAt < 0f)
+                            {
+                                fallbackAt = Time.unscaledTime + HookFallbackDelaySeconds;
+                                return false;
+                            }
+                            if (Time.unscaledTime < fallbackAt)
+                                return false;
+
+                            // 超过宽限期仍有玩家未通过 SpawnPositionOverride 落位（如断线重连或极端时序），回退启用主动坐标写回安全网。
+                            if (!fallbackActivated)
+                            {
+                                fallbackActivated = true;
+                                ModLog.Info($"多人回档：ModHooks 出生点覆写等待 {HookFallbackDelaySeconds:0.0}s 后仍有未恢复玩家（{_restored?.Count ?? 0}/{_pending.Count}），启用兜底坐标写回");
+                                ApplyLocalHostPositionIfPending();
+                            }
+
+                            return TryRestoreRemaining();
+                        },
+                        () => EndSession(capturedSession),
+                        15f,
+                        0.25f);
+                    return;
+                }
             }
+
+            ApplyLocalHostPosition(_pending);
+
             var runner = MpRollbackRunner.Instance;
             if (runner != null)
-                runner.RunOnceAfterWorldGenerated(TryApplyOnce, EndSession);
+            {
+                runner.RunPositionRestoreWindow(TryRestoreRemaining, () => EndSession(capturedSession), 15f, 0.25f);
+            }
             else
-                EndSession();
+            {
+                TryRestoreRemaining();
+                EndSession(capturedSession);
+            }
+        }
+
+        private static void ApplyLocalHostPositionIfPending()
+        {
+            if (_pending == null) return;
+            string hostId = MultiplayerBridge.GetLocalPersistentId();
+            if (string.IsNullOrEmpty(hostId)) return;
+            if (_restored != null && _restored.Contains(hostId)) return;
+            ApplyLocalHostPosition(_pending);
+        }
+
+        private static void EndSession(int capturedSession)
+        {
+            if (_sessionId != capturedSession || !_activeSession) return;
+
+            if (_pending != null && _restored != null && _restored.Count < _pending.Count && MultiplayerBridge.IsServer())
+            {
+                ModLog.Warning($"多人回档位置写回窗口结束：已恢复 {_restored.Count}/{_pending.Count} 名玩家");
+            }
+
+            _activeSession = false;
+            _pending = null;
+            _restored = null;
+            TogetherModHooksBridge.SetRestoreSavedPositions(false);
         }
 
         private static Vector2? ResolveHostPosition(SlotSidecar sidecar)
         {
-            if (sidecar == null) return null;
+            if (sidecar == null || !sidecar.HasPlayerPos) return null;
             if (string.Equals(sidecar.PosMode, "fixedPos", StringComparison.OrdinalIgnoreCase))
                 return new Vector2(sidecar.FixedX, sidecar.FixedY);
-            if (sidecar.HasPlayerPos) return new Vector2(sidecar.PlayerX, sidecar.PlayerY);
-            return null;
+            return new Vector2(sidecar.PlayerX, sidecar.PlayerY);
         }
 
-        private static void TryApplyOnce()
+        private static bool TryRestoreRemaining()
         {
-            if (_pending == null || _pending.Count == 0) return;
-            if (!MultiplayerBridge.IsMultiplayerRunning()) return;
+            if (!_activeSession || _pending == null || _pending.Count == 0) return true;
+            if (!MultiplayerBridge.IsMultiplayerRunning()) return true;
 
-            ApplyLocalHostPosition(_pending);
+            if (!MultiplayerBridge.IsServer())
+            {
+                ApplyLocalHostPosition(_pending);
+                return true;
+            }
 
-            if (!MultiplayerBridge.IsServer()) return;
-            int n = MultiplayerBridge.RestorePlayerPositions(_pending);
-            ModLog.Info($"多人回档位置写回（Server_TeleportCharacter）：{n} 名玩家");
+            string localId = MultiplayerBridge.GetLocalPersistentId();
+            var probe = new Dictionary<string, Vector2>(1);
+            int newlyRestored = 0;
+
+            foreach (var kv in _pending)
+            {
+                if (_restored != null && _restored.Contains(kv.Key)) continue;
+
+                probe.Clear();
+                probe[kv.Key] = kv.Value;
+
+                if (!string.IsNullOrEmpty(localId) && kv.Key == localId)
+                {
+                    ApplyLocalHostPosition(probe);
+                }
+
+                if (MultiplayerBridge.RestorePlayerPositions(probe) > 0)
+                {
+                    _restored?.Add(kv.Key);
+                    newlyRestored++;
+                }
+            }
+
+            if (newlyRestored > 0)
+            {
+                ModLog.Info($"多人回档位置写回（Server_TeleportCharacter）：本次恢复 {newlyRestored} 人（累计 {_restored?.Count ?? 0}/{_pending.Count}）");
+            }
+
+            return _restored != null && _restored.Count >= _pending.Count;
         }
 
-        /// <summary>仿 SelfSpawnPatcher.ApplyPendingPosition：先写本地 body+camera。</summary>
         private static void ApplyLocalHostPosition(Dictionary<string, Vector2> positions)
         {
             try
@@ -145,56 +274,17 @@ namespace CasualtiesUnknown.SaveManager
 
         internal static Dictionary<string, Vector2> ReadPlrPosFromMpRules(string rulesPath = null)
         {
-            var result = new Dictionary<string, Vector2>();
             rulesPath = rulesPath ?? MpSaveLocator.MpRulesPath;
             try
             {
-                if (!File.Exists(rulesPath)) return result;
-                string json = File.ReadAllText(rulesPath);
-                if (!MpRulesJson.TryFindPlrPosBlock(json, out int brace, out int end)) return result;
-                string block = json.Substring(brace + 1, end - brace - 1);
-                int p = 0;
-                while (p < block.Length)
-                {
-                    int q1 = block.IndexOf('"', p);
-                    if (q1 < 0) break;
-                    int q2 = block.IndexOf('"', q1 + 1);
-                    if (q2 < 0) break;
-                    string id = block.Substring(q1 + 1, q2 - q1 - 1);
-                    int objStart = block.IndexOf('{', q2);
-                    if (objStart < 0) break;
-                    int objEnd = block.IndexOf('}', objStart);
-                    if (objEnd < 0) break;
-                    string inner = block.Substring(objStart, objEnd - objStart + 1);
-                    float x = ParseCoord(inner, "Item1");
-                    if (Math.Abs(x) < 0.0001f) x = ParseCoord(inner, "x");
-                    float y = ParseCoord(inner, "Item2");
-                    if (Math.Abs(y) < 0.0001f) y = ParseCoord(inner, "y");
-                    if (id.Length > 0) result[id] = new Vector2(x, y);
-                    p = objEnd + 1;
-                }
+                if (!File.Exists(rulesPath)) return new Dictionary<string, Vector2>(StringComparer.Ordinal);
+                return MpRulesJson.ReadPlrPos(File.ReadAllText(rulesPath, System.Text.Encoding.UTF8));
             }
             catch (Exception ex)
             {
                 ModLog.Warning($"ReadPlrPosFromMpRules 失败：{ex.Message}");
+                return new Dictionary<string, Vector2>(StringComparer.Ordinal);
             }
-            return result;
-        }
-
-        private static float ParseCoord(string inner, string field)
-        {
-            int k = inner.IndexOf("\"" + field + "\"", StringComparison.Ordinal);
-            if (k < 0) return 0f;
-            int colon = inner.IndexOf(':', k);
-            if (colon < 0) return 0f;
-            int s = colon + 1;
-            while (s < inner.Length && (inner[s] == ' ' || inner[s] == '\t')) s++;
-            int e = s;
-            while (e < inner.Length && (char.IsDigit(inner[e]) || inner[e] == '-' || inner[e] == '.' || inner[e] == 'e' || inner[e] == 'E' || inner[e] == '+')) e++;
-            if (e <= s) return 0f;
-            float.TryParse(inner.Substring(s, e - s),
-                System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float v);
-            return v;
         }
     }
 
@@ -202,7 +292,44 @@ namespace CasualtiesUnknown.SaveManager
     [HarmonyPriority(Priority.Last)]
     internal static class MpPositionFinishPatch
     {
-        internal static void Postfix()
+        private sealed class CompletionEnumerator : IEnumerator, IDisposable
+        {
+            private readonly IEnumerator _inner;
+            private bool _completed;
+
+            internal CompletionEnumerator(IEnumerator inner)
+            {
+                _inner = inner;
+            }
+
+            public object Current => _inner.Current;
+
+            public bool MoveNext()
+            {
+                bool hasNext = _inner.MoveNext();
+                if (!hasNext && !_completed)
+                {
+                    _completed = true;
+                    InvokeAfterFinish();
+                }
+                return hasNext;
+            }
+
+            public void Reset() => _inner.Reset();
+            public void Dispose() => (_inner as IDisposable)?.Dispose();
+        }
+
+        internal static void Postfix(ref IEnumerator __result)
+        {
+            if (__result == null)
+            {
+                InvokeAfterFinish();
+                return;
+            }
+            __result = new CompletionEnumerator(__result);
+        }
+
+        private static void InvokeAfterFinish()
         {
             try { MpPositionRestorer.ApplyAfterFinishWorldGen(); }
             catch (Exception ex) { ModLog.Warning($"MpPositionFinishPatch 异常：{ex.Message}"); }

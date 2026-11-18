@@ -1,15 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using BepInEx.Configuration;
 using UnityEngine;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// 主面板：黑白线条风格 + 顶部 tab（设置 / 存档）。
-    /// 业务回调由 Plugin 注入；本类只管渲染、本地状态（tab / 滚动 / 输入框 / 改键）。
-    /// </summary>
+    /// <summary>存档管理主窗口，负责设置、槽位管理、回档、关于及外部模组侧栏分页渲染。</summary>
     internal sealed class SaveManagerWindow
     {
         private const int WindowId = 0x5A4D5310;
@@ -17,8 +15,9 @@ namespace CasualtiesUnknown.SaveManager
         private const float WindowHeight = 900f;
         private const float TitleBarHeight = 64f;
         private const float CloseBtnSize = 52f;
-        private const float LabelColW = 220f; // 设置页所有"标签：值"行的左侧标签宽
+        private const float LabelColW = 220f;
         private const float RowMinHeight = 52f;
+        private const float SlotCacheTtlSeconds = 0.5f;
 
         private readonly HotkeyConfig _cfg;
         private readonly SaveStore _store;
@@ -35,49 +34,71 @@ namespace CasualtiesUnknown.SaveManager
 
         private Rect _rect = new Rect(120f, 60f, WindowWidth, WindowHeight);
         private float _drawScale = 1f;
-        private int _tab; // saveManager 自身子 tab：0 设置 / 1 槽位 / 2 回滚
-        private int _sideIdx; // 侧栏：0 saveManager 自身，1+ 外部 mod
+        private int _tab;
+        private int _sideIdx;
+        private Vector2 _sidebarScroll;
         private Vector2 _scroll;
+        private Vector2 _settingsScroll;
+        private Vector2 _aboutScroll;
 
-        // 立即保存的昵称输入
         private string _quickNickname = "";
 
-        // 改键采集状态
         private bool _capturingSettingsKey;
         private bool _capturingSlotsKey;
         private bool _capturingQuickKey;
 
-        // 固定世界设置输入缓存（首帧从配置初始化）
         private string _seedInputCache;
         private string _fixedXCache;
         private string _fixedYCache;
 
-        // 卡片昵称编辑状态：path -> 当前编辑文本
         private readonly Dictionary<string, string> _editingNicknames = new Dictionary<string, string>();
-
-        // 日期分组折叠状态：dateFolder -> 是否展开。默认全部展开。
         private readonly Dictionary<string, bool> _dateExpanded = new Dictionary<string, bool>();
-        // runId 分组折叠状态：runIdFolder -> 是否展开。默认全部展开。
         private readonly Dictionary<string, bool> _runIdExpanded = new Dictionary<string, bool>();
 
-        // 哪一条卡片处于昵称编辑态（path）。null = 没人在编辑。
         private string _nicknameEditingPath;
         private bool _loggedDrawForCurrentOpen;
 
-        internal bool Open { get; set; }
-        internal Rect WindowRect => new Rect(_rect.x * _drawScale, _rect.y * _drawScale, _rect.width * _drawScale, _rect.height * _drawScale);
+        private List<SlotInfo> _cachedSlots;
+        private string _cachedSaveHash;
+        private int _cachedRunId;
+        private float _nextCacheRefreshAt;
+        private bool _slotCacheDirty = true;
 
-        /// <summary>由外部 (UI 注入按钮 / 快捷键) 打开面板。除了置 Open=true，还触发一次性副作用（如关 ESC 暂停面板防穿透）。</summary>
+        internal bool Open { get; set; }
+
+        /// <summary>当前是否正在等待用户按下新的绑定快捷键。</summary>
+        internal bool IsCapturingKey => _capturingSettingsKey || _capturingSlotsKey || _capturingQuickKey;
+
+        /// <summary>当前是否处于文本编辑或按键捕获态。</summary>
+        internal bool ExpectsTextInput =>
+            Open && (IsCapturingKey
+                     || !string.IsNullOrEmpty(_nicknameEditingPath)
+                     || GUIUtility.keyboardControl != 0);
+
+        /// <summary>打开主面板并执行打开钩子（阻断下层 uGUI 射线等）。</summary>
         internal void OpenPanel()
         {
             if (Open) return;
             Open = true;
             _loggedDrawForCurrentOpen = false;
+            _seedInputCache = null;
+            _fixedXCache = null;
+            _fixedYCache = null;
+            InvalidateSlotCache();
             ModLog.Info("SaveManagerWindow.OpenPanel -> Open=true");
             _onOpened?.Invoke();
         }
 
-        /// <summary>关闭面板并触发 onClosed 副作用（恢复被暂时禁用的 raycaster 等）。</summary>
+        /// <summary>打开主面板并定位到本模组设置分页。</summary>
+        internal void OpenSettingsTab()
+        {
+            _sideIdx = 0;
+            _tab = 0;
+            OpenPanel();
+            CancelKeyCapture();
+        }
+
+        /// <summary>关闭主面板、取消按键捕获并释放键盘焦点。</summary>
         internal void ClosePanel()
         {
             if (!Open) return;
@@ -85,25 +106,12 @@ namespace CasualtiesUnknown.SaveManager
             _loggedDrawForCurrentOpen = false;
             CancelKeyCapture();
             _nicknameEditingPath = null;
+            InvalidateSlotCache();
             ImGuiImeRecovery.RequestClear();
             _onClosed?.Invoke();
         }
 
-        /// <summary>当前是否可能有 IMGUI 文本框持有键盘焦点。</summary>
-        internal bool ExpectsTextInput =>
-            Open && (_capturingSettingsKey || _capturingSlotsKey || _capturingQuickKey
-                     || !string.IsNullOrEmpty(_nicknameEditingPath));
-
-        /// <summary>当前光标是否在主面板矩形内（被 UIUtilBlockPatch 用来阻止穿透到游戏）。</summary>
-        internal bool IsCursorOver()
-        {
-            if (!Open) return false;
-            // IMGUI 坐标 Y 朝下，Input.mousePosition Y 朝上，需要换算
-            var mouse = new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y);
-            var screenRect = new Rect(_rect.x * _drawScale, _rect.y * _drawScale,
-                _rect.width * _drawScale, _rect.height * _drawScale);
-            return screenRect.Contains(mouse);
-        }
+        internal void InvalidateSlotCache() => _slotCacheDirty = true;
 
         internal SaveManagerWindow(HotkeyConfig cfg, SaveStore store,
             Action onSaveNow, Action<string> onSaveNowAs, Action onSaveAndExit,
@@ -122,12 +130,14 @@ namespace CasualtiesUnknown.SaveManager
             _getStatus = getStatus;
             _onOpened = onOpened;
             _onClosed = onClosed;
-            _rollbackTab = new RollbackTabView(cfg, store, rollback);
+            _rollbackTab = new RollbackTabView(cfg, store, rollback, GetRollbackSnapshot, InvalidateSlotCache);
         }
 
         internal void Draw()
         {
             if (!Open) return;
+            RefreshSlotCacheIfNeeded();
+
             _drawScale = ComputeScale();
             if (!_loggedDrawForCurrentOpen)
             {
@@ -145,7 +155,6 @@ namespace CasualtiesUnknown.SaveManager
             Matrix4x4 prev = GUI.matrix;
             try
             {
-                // 顶层 GUI.matrix 缩放：IMGUI 用此 matrix 同时画窗口框与回调内容，整体等比缩
                 GUI.matrix = Matrix4x4.Scale(new Vector3(_drawScale, _drawScale, 1f));
                 _rect = GUI.ModalWindow(WindowId, _rect, DrawContent, "");
             }
@@ -165,11 +174,44 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        /// <summary>按屏幕尺寸算缩放比，使窗口不超出屏幕；屏幕足够大时不放大（上限 1）。</summary>
+        private void RefreshSlotCacheIfNeeded()
+        {
+            if (_sideIdx != 0 || (_tab != 1 && _tab != 2)) return;
+
+            var ev = Event.current;
+            bool canRefreshNow = _cachedSlots == null || (ev != null && ev.type == EventType.Layout);
+            if (!canRefreshNow) return;
+            if (!_slotCacheDirty && Time.unscaledTime < _nextCacheRefreshAt) return;
+
+            _cachedSlots = _store.ListSlots();
+            _cachedSaveHash = _tab == 1 ? SaveStore.ComputeCurrentSaveHash() : null;
+            _cachedRunId = SaveStore.ComputeCurrentRunId();
+            _slotCacheDirty = false;
+            _nextCacheRefreshAt = Time.unscaledTime + SlotCacheTtlSeconds;
+        }
+
+        private (List<SlotInfo> slots, int currentRunId) GetRollbackSnapshot()
+        {
+            if (_cachedSlots == null)
+            {
+                _cachedSlots = _store.ListSlots();
+                _cachedRunId = SaveStore.ComputeCurrentRunId();
+                _slotCacheDirty = false;
+                _nextCacheRefreshAt = Time.unscaledTime + SlotCacheTtlSeconds;
+            }
+            return (_cachedSlots, _cachedRunId);
+        }
+
         private static float ComputeScale()
         {
             float fit = Mathf.Min(Screen.width / WindowWidth, Screen.height / WindowHeight) * 0.92f;
             return Mathf.Clamp(fit, 0.3f, 1f);
+        }
+
+        private static void ClearTextFocus()
+        {
+            GUI.FocusControl(null);
+            GUIUtility.keyboardControl = 0;
         }
 
         internal void CancelKeyCapture()
@@ -179,28 +221,23 @@ namespace CasualtiesUnknown.SaveManager
             _capturingQuickKey = false;
         }
 
-        // —— 主体 —— //
-
         private void DrawContent(int id)
         {
-            // 整体白色边框（6px 加粗）
             BlackWhiteSkin.DrawBorder(new Rect(0f, 0f, WindowWidth, WindowHeight), 6f);
 
-            // 标题栏：左侧标题 + 右上角 X 关闭按钮
             GUI.Label(new Rect(28f, 14f, WindowWidth - CloseBtnSize - 56f, 40f),
                 I18n.T("app.name"), BlackWhiteSkin.HeaderStyle);
 
-            // 右上角 X 关闭按钮
             var closeRect = new Rect(WindowWidth - CloseBtnSize - 12f, 8f, CloseBtnSize, CloseBtnSize);
             if (GUI.Button(closeRect, GUIContent.none))
             {
                 ClosePanel();
+                GUIUtility.ExitGUI();
             }
             BlackWhiteSkin.DrawBorder(closeRect, 4f);
             BlackWhiteSkin.DrawCloseX(new Rect(closeRect.x + 13f, closeRect.y + 13f,
                 closeRect.width - 26f, closeRect.height - 26f), 6f);
 
-            // 标题栏下方分隔
             BlackWhiteSkin.DrawHLine(new Rect(0f, TitleBarHeight, WindowWidth, 4f));
 
             const float SidebarWidth = 240f;
@@ -222,10 +259,8 @@ namespace CasualtiesUnknown.SaveManager
             if (_sideIdx == 0) DrawSelfTabs(mainRect);
             else DrawExternal(mainRect, _sideIdx - 1);
 
-            // 状态条 + 上方分隔线
             BlackWhiteSkin.DrawHLine(new Rect(0f, WindowHeight - StatusBarH, WindowWidth, 4f));
-            string status = ResolveStatus();
-            GUI.Label(new Rect(28f, WindowHeight - StatusBarH + 16f, WindowWidth - 56f, 32f), status);
+            GUI.Label(new Rect(28f, WindowHeight - StatusBarH + 16f, WindowWidth - 56f, 32f), ResolveStatus());
 
             GUI.DragWindow(new Rect(0f, 0f, WindowWidth - CloseBtnSize - 24f, TitleBarHeight));
         }
@@ -235,28 +270,44 @@ namespace CasualtiesUnknown.SaveManager
             if (_sideIdx == 0) return _getStatus?.Invoke() ?? "";
             var ext = ExternalTabRegistry.Entries;
             int idx = _sideIdx - 1;
-            if (idx < 0 || idx >= ext.Count) return "";
-            return ext[idx].Status;
+            return idx >= 0 && idx < ext.Count ? ext[idx].Status : "";
         }
 
         private void DrawSidebar(Rect area)
         {
-            float btnH = 64f;
-            float gap = 8f;
-            float topPad = 8f;
+            const float BtnH = 64f;
+            const float Gap = 8f;
+            const float TopPad = 8f;
             var ext = ExternalTabRegistry.Entries;
             int total = 1 + ext.Count;
+            float contentH = TopPad + total * BtnH + Mathf.Max(0, total - 1) * Gap + TopPad;
+            bool needScroll = contentH > area.height;
+            float btnW = needScroll ? area.width - 28f : area.width;
+
+            if (needScroll)
+            {
+                _sidebarScroll = GUI.BeginScrollView(area, _sidebarScroll, new Rect(0f, 0f, btnW, contentH));
+            }
+
+            float baseX = needScroll ? 0f : area.x;
+            float baseY = needScroll ? TopPad : area.y + TopPad;
             for (int i = 0; i < total; i++)
             {
-                var rect = new Rect(area.x, area.y + topPad + i * (btnH + gap), area.width, btnH);
+                var rect = new Rect(baseX, baseY + i * (BtnH + Gap), btnW, BtnH);
                 string label = i == 0 ? I18n.T("app.name") : ext[i - 1].Title;
                 var style = i == _sideIdx ? BlackWhiteSkin.TabActiveStyle : BlackWhiteSkin.TabStyle;
-                if (GUI.Button(rect, label, style))
+                if (GUI.Button(rect, label, style) && _sideIdx != i)
                 {
                     _sideIdx = i;
+                    InvalidateSlotCache();
+                    ClearTextFocus();
                     CancelKeyCapture();
+                    if (needScroll) GUI.EndScrollView();
+                    GUIUtility.ExitGUI();
                 }
             }
+
+            if (needScroll) GUI.EndScrollView();
         }
 
         private void DrawSelfTabs(Rect mainRect)
@@ -276,39 +327,53 @@ namespace CasualtiesUnknown.SaveManager
 
         private void DrawSelfTabBar(Rect rowRect)
         {
-            const float gap = 12f;
-            float tabW = (rowRect.width - gap * 3f) / 4f;
+            const float Gap = 12f;
+            float tabW = (rowRect.width - Gap * 3f) / 4f;
             DrawTabButton(new Rect(rowRect.x, rowRect.y, tabW, rowRect.height), I18n.T("tab.settings"), 0);
-            DrawTabButton(new Rect(rowRect.x + (tabW + gap), rowRect.y, tabW, rowRect.height), I18n.T("tab.slots"), 1);
-            DrawTabButton(new Rect(rowRect.x + (tabW + gap) * 2f, rowRect.y, tabW, rowRect.height), I18n.T("tab.rollback"), 2);
-            DrawTabButton(new Rect(rowRect.x + (tabW + gap) * 3f, rowRect.y, tabW, rowRect.height), I18n.T("tab.about"), 3);
+            DrawTabButton(new Rect(rowRect.x + (tabW + Gap), rowRect.y, tabW, rowRect.height), I18n.T("tab.slots"), 1);
+            DrawTabButton(new Rect(rowRect.x + (tabW + Gap) * 2f, rowRect.y, tabW, rowRect.height), I18n.T("tab.rollback"), 2);
+            DrawTabButton(new Rect(rowRect.x + (tabW + Gap) * 3f, rowRect.y, tabW, rowRect.height), I18n.T("tab.about"), 3);
         }
 
         private void DrawExternal(Rect mainRect, int extIdx)
         {
             var ext = ExternalTabRegistry.Entries;
-            if (extIdx < 0 || extIdx >= ext.Count) { _sideIdx = 0; return; }
+            if (extIdx < 0 || extIdx >= ext.Count)
+            {
+                _sideIdx = 0;
+                GUIUtility.ExitGUI();
+                return;
+            }
             const float Pad = 20f;
             var inner = new Rect(mainRect.x + Pad, mainRect.y + Pad, mainRect.width - Pad * 2f, mainRect.height - Pad * 2f);
             GUILayout.BeginArea(inner);
-            try { ext[extIdx].Draw?.Invoke(); }
-            catch (Exception ex) { GUILayout.Label("external tab error: " + ex.Message); }
+            try
+            {
+                ext[extIdx].Draw?.Invoke();
+            }
+            catch (ExitGUIException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                GUILayout.Label("external tab error: " + ex.Message);
+            }
             GUILayout.EndArea();
         }
 
         private void DrawTabButton(Rect rect, string label, int idx)
         {
             var style = idx == _tab ? BlackWhiteSkin.TabActiveStyle : BlackWhiteSkin.TabStyle;
-            if (GUI.Button(rect, label, style))
+            if (GUI.Button(rect, label, style) && _tab != idx)
             {
                 _tab = idx;
+                InvalidateSlotCache();
+                ClearTextFocus();
                 CancelKeyCapture();
+                GUIUtility.ExitGUI();
             }
         }
-
-        // —— 设置页 —— //
-
-        private Vector2 _settingsScroll;
 
         private void DrawSettingsTab()
         {
@@ -330,13 +395,18 @@ namespace CasualtiesUnknown.SaveManager
                 if (string.IsNullOrEmpty(_quickNickname)) _onSaveNow?.Invoke();
                 else _onSaveNowAs?.Invoke(_quickNickname);
                 _quickNickname = "";
+                InvalidateSlotCache();
+                ClearTextFocus();
             }
             GUILayout.Space(12f);
             if (GUILayout.Button(I18n.T("btn.save_exit"),
                 GUILayout.MinWidth(180f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight)))
             {
-                _onSaveAndExit?.Invoke();
                 _quickNickname = "";
+                ClearTextFocus();
+                _onSaveAndExit?.Invoke();
+                InvalidateSlotCache();
+                GUIUtility.ExitGUI();
             }
             GUILayout.EndHorizontal();
             GUILayout.EndVertical();
@@ -353,10 +423,11 @@ namespace CasualtiesUnknown.SaveManager
             }
 
             DrawFloatSlider(I18n.F("fmt.interval_minutes", _cfg.AutoBackupIntervalMinutes.Value),
-                _cfg.AutoBackupIntervalMinutes, 0.5f, 60f, snap: 0.5f, onChanged: _onIntervalChanged);
+                _cfg.AutoBackupIntervalMinutes, 0.5f, Mathf.Max(240f, _cfg.AutoBackupIntervalMinutes.Value),
+                snap: 0.5f, onChanged: _onIntervalChanged);
 
             DrawIntSlider(I18n.F("fmt.auto_keep_count", _cfg.AutoBackupKeep.Value),
-                _cfg.AutoBackupKeep, 1, 30);
+                _cfg.AutoBackupKeep, 1, Mathf.Max(100, _cfg.AutoBackupKeep.Value));
 
             bool newGuard = DrawSwitch(I18n.T("sw.backup_before_overwrite"), _cfg.BackupBeforeOverwrite.Value);
             if (newGuard != _cfg.BackupBeforeOverwrite.Value) _cfg.BackupBeforeOverwrite.Value = newGuard;
@@ -371,24 +442,25 @@ namespace CasualtiesUnknown.SaveManager
             if (newAutoRollback != _cfg.AutoRollbackOnDeath.Value) _cfg.AutoRollbackOnDeath.Value = newAutoRollback;
 
             DrawFloatSlider(I18n.F("fmt.rollback_delay", _cfg.RollbackDelaySeconds.Value),
-                _cfg.RollbackDelaySeconds, 1f, 10f, snap: 0.5f, onChanged: null);
+                _cfg.RollbackDelaySeconds, 1f, Mathf.Max(10f, _cfg.RollbackDelaySeconds.Value),
+                snap: 0.5f, onChanged: null);
 
-            DrawIntSlider(I18n.F("fmt.mp_death_threshold", _cfg.MultiplayerDeathThreshold.Value),
-                _cfg.MultiplayerDeathThreshold, 1, 16);
+            string mpThresholdLabel = _cfg.MultiplayerDeathThreshold.Value <= 0
+                ? I18n.T("lbl.mp_death_all")
+                : I18n.F("fmt.mp_death_threshold", _cfg.MultiplayerDeathThreshold.Value);
+            DrawIntSlider(mpThresholdLabel,
+                _cfg.MultiplayerDeathThreshold, 0, Mathf.Max(16, _cfg.MultiplayerDeathThreshold.Value));
 
             DrawIntSlider(I18n.F("fmt.recent_slots_limit", _cfg.RecentSlotsLimit.Value),
-                _cfg.RecentSlotsLimit, 5, 100);
+                _cfg.RecentSlotsLimit, 5, Mathf.Max(100, _cfg.RecentSlotsLimit.Value));
 
             GUILayout.EndVertical();
 
-            if (QolBridge.IsQolPresent() || MultiplayerBridge.IsMultiplayerEnabled())
-            {
-                GUILayout.Space(12f);
-                GUILayout.Label(I18n.T("sec.world"), BlackWhiteSkin.HeaderStyle);
-                GUILayout.BeginVertical(BlackWhiteSkin.CardStyle);
-                DrawWorldGroup();
-                GUILayout.EndVertical();
-            }
+            GUILayout.Space(12f);
+            GUILayout.Label(I18n.T("sec.world"), BlackWhiteSkin.HeaderStyle);
+            GUILayout.BeginVertical(BlackWhiteSkin.CardStyle);
+            DrawWorldGroup();
+            GUILayout.EndVertical();
 
             GUILayout.Space(12f);
             GUILayout.Label(I18n.T("sec.hotkeys"), BlackWhiteSkin.HeaderStyle);
@@ -407,11 +479,13 @@ namespace CasualtiesUnknown.SaveManager
             GUILayout.BeginVertical(BlackWhiteSkin.CardStyle);
             bool newShowLog = DrawSwitch(I18n.T("sw.show_log_in_console"), _cfg.ShowLogInConsole.Value);
             if (newShowLog != _cfg.ShowLogInConsole.Value) _cfg.ShowLogInConsole.Value = newShowLog;
+
             bool newSuppressSupplies = DrawSwitch(I18n.T("sw.suppress_starting_supplies_on_load"), _cfg.SuppressStartingSuppliesOnLoad.Value);
             if (newSuppressSupplies != _cfg.SuppressStartingSuppliesOnLoad.Value) _cfg.SuppressStartingSuppliesOnLoad.Value = newSuppressSupplies;
 
             bool newSuppressLifepod = DrawSwitch(I18n.T("sw.suppress_intro_lifepod_on_load"), _cfg.SuppressIntroLifepodOnLoad.Value);
             if (newSuppressLifepod != _cfg.SuppressIntroLifepodOnLoad.Value) _cfg.SuppressIntroLifepodOnLoad.Value = newSuppressLifepod;
+
             bool newAcceptUpdate = DrawSwitch(I18n.T("sw.accept_update_notice"), _cfg.AcceptUpdateNotice.Value);
             if (newAcceptUpdate != _cfg.AcceptUpdateNotice.Value)
             {
@@ -424,10 +498,6 @@ namespace CasualtiesUnknown.SaveManager
             GUILayout.Space(20f);
             GUILayout.EndScrollView();
         }
-
-        // —— 关于页 —— //
-
-        private Vector2 _aboutScroll;
 
         private void DrawAboutTab()
         {
@@ -463,24 +533,12 @@ namespace CasualtiesUnknown.SaveManager
         }
 
         private static GUIStyle _centerTitle;
-        private static GUIStyle CenterTitleStyle
-        {
-            get
-            {
-                if (_centerTitle == null) _centerTitle = new GUIStyle(BlackWhiteSkin.HeaderStyle) { alignment = TextAnchor.MiddleCenter };
-                return _centerTitle;
-            }
-        }
+        private static GUIStyle CenterTitleStyle =>
+            _centerTitle ?? (_centerTitle = new GUIStyle(BlackWhiteSkin.HeaderStyle) { alignment = TextAnchor.MiddleCenter });
 
         private static GUIStyle _centerLabel;
-        private static GUIStyle CenterLabelStyle
-        {
-            get
-            {
-                if (_centerLabel == null) _centerLabel = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleCenter, wordWrap = true };
-                return _centerLabel;
-            }
-        }
+        private static GUIStyle CenterLabelStyle =>
+            _centerLabel ?? (_centerLabel = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleCenter, wordWrap = true });
 
         private static void DrawLinkButton(string label, string url)
         {
@@ -510,12 +568,12 @@ namespace CasualtiesUnknown.SaveManager
             GUILayout.Space(4f);
         }
 
-        // —— 存档页 —— //
-
         private void DrawSlotsTab()
         {
-            // 顶部固定操作条（在 ScrollView 之外）
-            var slots = _store.ListSlots();
+            var slots = _cachedSlots ?? _store.ListSlots();
+            string currentHash = _cachedSaveHash;
+            int currentRunId = _cachedRunId;
+
             GUILayout.Space(4f);
             GUILayout.BeginHorizontal();
             GUILayout.Label(I18n.F("fmt.total_slots", slots.Count),
@@ -529,6 +587,7 @@ namespace CasualtiesUnknown.SaveManager
                     _runIdExpanded[s.RunIdFolder] = true;
                     _dateExpanded[RunDateKey(s)] = true;
                 }
+                GUIUtility.ExitGUI();
             }
             GUILayout.Space(12f);
             if (GUILayout.Button(I18n.T("btn.collapse_all"),
@@ -539,21 +598,17 @@ namespace CasualtiesUnknown.SaveManager
                     _runIdExpanded[s.RunIdFolder] = false;
                     _dateExpanded[RunDateKey(s)] = false;
                 }
+                GUIUtility.ExitGUI();
             }
             GUILayout.EndHorizontal();
             GUILayout.Space(8f);
 
-            // 滚动列表占满剩余空间，多日期可滚
             _scroll = GUILayout.BeginScrollView(_scroll,
                 GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
 
-            // 当前存档卡片（在滚动列表里，与日期分组一起滚）
-            string currentHash = SaveStore.ComputeCurrentSaveHash();
-            int currentRunId = SaveStore.ComputeCurrentRunId();
-            DrawCurrentSaveCard(currentHash);
+            DrawCurrentSaveCard(currentHash, currentRunId);
 
-            // 三层嵌套：runId → 日期 → 卡片。ListSlots 按保存时刻跨冒险排序，
-            // 同一 runId 可能被别的 run 隔开，必须先分组再画，否则会出现重复组头。
+            // ListSlots 按全局时间倒序，必须先按 runId 与日期聚合以避免重复组头
             foreach (var runGroup in GroupByRunId(slots))
             {
                 string runIdFolder = runGroup[0].RunIdFolder;
@@ -570,8 +625,7 @@ namespace CasualtiesUnknown.SaveManager
 
                     foreach (var slot in dateGroup)
                     {
-                        // 当前存档判定：runId 必须匹配 + 文件 hash 一致。
-                        // 单看 hash 会出现 "跨 run 但内容相同" 的存档被误标当前——比如旧 cInfo 缓存下手动保存。
+                        // 同时校验 runId 与文件哈希，防止跨局同字节存档误判为当前存档
                         bool isCurrent = currentHash != null
                             && currentRunId != 0
                             && slot.Sidecar.RunId == currentRunId
@@ -588,10 +642,8 @@ namespace CasualtiesUnknown.SaveManager
             GUILayout.EndScrollView();
         }
 
-        /// <summary>日期折叠状态的复合 key：runId 加日期。同一日期在不同 runId 下独立折叠。</summary>
         private static string RunDateKey(SlotInfo s) => s.RunIdFolder + "/" + s.DateFolder;
 
-        /// <summary>按 RunIdFolder 分组，保持首次出现顺序（组序 = 最近一条槽位）。</summary>
         private static List<List<SlotInfo>> GroupByRunId(List<SlotInfo> slots)
         {
             var groups = new List<List<SlotInfo>>();
@@ -609,7 +661,6 @@ namespace CasualtiesUnknown.SaveManager
             return groups;
         }
 
-        /// <summary>组内按 DateFolder 分组，保持首次出现顺序。</summary>
         private static List<List<SlotInfo>> GroupByDate(List<SlotInfo> slots)
         {
             var groups = new List<List<SlotInfo>>();
@@ -627,7 +678,7 @@ namespace CasualtiesUnknown.SaveManager
             return groups;
         }
 
-        private void DrawCurrentSaveCard(string currentHash)
+        private static void DrawCurrentSaveCard(string currentHash, int runId)
         {
             GUILayout.BeginVertical(BlackWhiteSkin.CardStyle);
             GUILayout.BeginHorizontal();
@@ -635,7 +686,7 @@ namespace CasualtiesUnknown.SaveManager
                 GUILayout.MinWidth(220f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(36f));
             GUILayout.Label(SaveStore.CurrentSaveDisplayPath, GUILayout.ExpandWidth(true), GUILayout.MinHeight(36f));
             GUILayout.EndHorizontal();
-            int runId = SaveStore.ComputeCurrentRunId();
+
             string sub;
             if (SaveStore.IsMultiplayerContextActive())
             {
@@ -647,12 +698,10 @@ namespace CasualtiesUnknown.SaveManager
             }
             else if (WorldGeneration.world != null)
             {
-                // 游戏内：进度还在内存，save.sv 只在保存时才写。
                 sub = runId != 0 ? I18n.F("fmt.run_id_in_memory", runId) : I18n.T("msg.progress_in_memory");
             }
             else if (SaveSystem.loadedRun && File.Exists(SlotSidecar.SidecarPath(SaveStore.GameSavePath)))
             {
-                // 主菜单：读档后游戏删了 save.sv，但 sidecar 还在，说明本 run 的进度刚被读过。
                 sub = runId != 0 ? I18n.F("fmt.run_id_after_load", runId) : I18n.T("msg.after_load_not_saved");
             }
             else
@@ -681,6 +730,7 @@ namespace CasualtiesUnknown.SaveManager
                 BlackWhiteSkin.HeaderButtonStyle, GUILayout.ExpandWidth(true), GUILayout.MinHeight(56f)))
             {
                 _runIdExpanded[runIdFolder] = !_runIdExpanded[runIdFolder];
+                GUIUtility.ExitGUI();
             }
             GUILayout.Space(4f);
         }
@@ -689,12 +739,13 @@ namespace CasualtiesUnknown.SaveManager
         {
             GUILayout.Space(4f);
             GUILayout.BeginHorizontal();
-            GUILayout.Space(28f); // 二级缩进
+            GUILayout.Space(28f);
             string prefix = _dateExpanded[dateKey] ? "▼  " : "▶  ";
             if (GUILayout.Button(prefix + I18n.F("fmt.date_count", dateFolder, count),
                 BlackWhiteSkin.HeaderButtonStyle, GUILayout.ExpandWidth(true), GUILayout.MinHeight(44f)))
             {
                 _dateExpanded[dateKey] = !_dateExpanded[dateKey];
+                GUIUtility.ExitGUI();
             }
             GUILayout.EndHorizontal();
             GUILayout.Space(4f);
@@ -703,10 +754,9 @@ namespace CasualtiesUnknown.SaveManager
         private void DrawSlotCard(SlotInfo slot, bool isCurrent)
         {
             GUILayout.BeginHorizontal();
-            GUILayout.Space(56f); // 三级缩进，呈现嵌套层级
+            GUILayout.Space(56f);
             GUILayout.BeginVertical(BlackWhiteSkin.CardStyle);
 
-            // 第一行：标签 + 别名（含铅笔编辑） + 操作按钮区
             GUILayout.BeginHorizontal();
             string tag = slot.Sidecar.Pinned ? I18n.T("lbl.tag_pinned")
                 : (slot.Sidecar.IsAuto ? I18n.T("lbl.tag_auto") : I18n.T("lbl.tag_manual"));
@@ -727,12 +777,17 @@ namespace CasualtiesUnknown.SaveManager
                     slot.Sidecar.Nickname = _editingNicknames[key] ?? "";
                     _store.UpdateSidecar(slot.FullSlotPath, slot.Sidecar);
                     _nicknameEditingPath = null;
+                    InvalidateSlotCache();
+                    ClearTextFocus();
+                    GUIUtility.ExitGUI();
                 }
                 if (GUILayout.Button("×", BlackWhiteSkin.IconBtnStyle,
                     GUILayout.Width(40f), GUILayout.MinHeight(36f)))
                 {
                     _editingNicknames[key] = slot.Sidecar.Nickname;
                     _nicknameEditingPath = null;
+                    ClearTextFocus();
+                    GUIUtility.ExitGUI();
                 }
             }
             else
@@ -745,6 +800,7 @@ namespace CasualtiesUnknown.SaveManager
                 if (GUI.Button(penBtn, GUIContent.none, BlackWhiteSkin.IconBtnStyle))
                 {
                     _nicknameEditingPath = key;
+                    GUIUtility.ExitGUI();
                 }
                 BlackWhiteSkin.DrawPencil(new Rect(penBtn.x + 8f, penBtn.y + 8f,
                     penBtn.width - 16f, penBtn.height - 16f), 2f);
@@ -752,7 +808,6 @@ namespace CasualtiesUnknown.SaveManager
 
             GUILayout.EndHorizontal();
 
-            // 第二行：文件名 + 时间 / 大小 / 当前标识
             GUILayout.BeginHorizontal();
             GUILayout.Label("  " + slot.File.Name,
                 GUILayout.MinWidth(360f), GUILayout.ExpandWidth(true), GUILayout.MinHeight(28f));
@@ -770,7 +825,6 @@ namespace CasualtiesUnknown.SaveManager
                 GUILayout.MinWidth(220f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(28f));
             GUILayout.EndHorizontal();
 
-            // 第三行：操作按钮区（切换 / 标记 / 删除）。当前存档隐藏切换按钮。
             GUILayout.Space(6f);
             GUILayout.BeginHorizontal();
             if (!isCurrent)
@@ -779,6 +833,8 @@ namespace CasualtiesUnknown.SaveManager
                     GUILayout.MinWidth(180f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(36f)))
                 {
                     _onLoadSlot?.Invoke(slot);
+                    InvalidateSlotCache();
+                    GUIUtility.ExitGUI();
                 }
                 GUILayout.Space(8f);
             }
@@ -788,6 +844,8 @@ namespace CasualtiesUnknown.SaveManager
             {
                 slot.Sidecar.Pinned = !slot.Sidecar.Pinned;
                 _store.UpdateSidecar(slot.FullSlotPath, slot.Sidecar);
+                InvalidateSlotCache();
+                GUIUtility.ExitGUI();
             }
             GUILayout.FlexibleSpace();
             if (GUILayout.Button(I18n.T("btn.delete"),
@@ -796,6 +854,9 @@ namespace CasualtiesUnknown.SaveManager
                 _onDeleteSlot?.Invoke(slot);
                 _editingNicknames.Remove(key);
                 if (_nicknameEditingPath == key) _nicknameEditingPath = null;
+                InvalidateSlotCache();
+                ClearTextFocus();
+                GUIUtility.ExitGUI();
             }
             GUILayout.EndHorizontal();
 
@@ -804,20 +865,26 @@ namespace CasualtiesUnknown.SaveManager
             GUILayout.Space(8f);
         }
 
-        // —— 控件 helpers —— //
+        private void SyncWorldPreference()
+        {
+            WorldEngineArbiter.SyncPreference(_cfg.PreferredEngine.Value, _cfg.SeedInput.Value,
+                _cfg.PositionMode.Value, _cfg.FixedX.Value, _cfg.FixedY.Value);
+        }
 
-        /// <summary>固定世界：QoL / 联机模组 / 本 mod 三选一（按 mod 安装情况显示按钮）+ 种子 + 位置。</summary>
         private void DrawWorldGroup()
         {
             bool qolPresent = QolBridge.IsQolPresent();
             bool krokPresent = MultiplayerBridge.IsMultiplayerEnabled();
-            string engine = WorldEngineArbiter.NormalizeEngineName(_cfg.PreferredEngine.Value);
+            string pref = WorldEngineArbiter.NormalizeEngineName(_cfg.PreferredEngine.Value);
+            string engine = pref == "self" ? "self"
+                : (pref == "krok" && krokPresent) ? "krok"
+                : (pref == "qol" && qolPresent) ? "qol"
+                : (krokPresent ? "krok" : "self");
 
             GUILayout.BeginHorizontal();
             GUILayout.Label(I18n.T("lbl.world_engine"),
                 GUILayout.MinWidth(LabelColW), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight));
             GUILayout.Space(12f);
-            bool prevEnabled = GUI.enabled;
 
             if (qolPresent)
             {
@@ -826,7 +893,9 @@ namespace CasualtiesUnknown.SaveManager
                     GUILayout.MinWidth(160f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight)))
                 {
                     _cfg.PreferredEngine.Value = "qol";
-                    engine = "qol";
+                    SyncWorldPreference();
+                    ClearTextFocus();
+                    GUIUtility.ExitGUI();
                 }
                 GUILayout.Space(8f);
             }
@@ -838,7 +907,9 @@ namespace CasualtiesUnknown.SaveManager
                     GUILayout.MinWidth(160f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight)))
                 {
                     _cfg.PreferredEngine.Value = "krok";
-                    engine = "krok";
+                    SyncWorldPreference();
+                    ClearTextFocus();
+                    GUIUtility.ExitGUI();
                 }
                 GUILayout.Space(8f);
             }
@@ -848,9 +919,10 @@ namespace CasualtiesUnknown.SaveManager
                 GUILayout.MinWidth(160f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight)))
             {
                 _cfg.PreferredEngine.Value = "self";
-                engine = "self";
+                SyncWorldPreference();
+                ClearTextFocus();
+                GUIUtility.ExitGUI();
             }
-            GUI.enabled = prevEnabled;
             GUILayout.FlexibleSpace();
             GUILayout.EndHorizontal();
             GUILayout.Space(6f);
@@ -887,15 +959,21 @@ namespace CasualtiesUnknown.SaveManager
                 GUILayout.MinWidth(LabelColW), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight));
             GUILayout.Space(20f);
             if (GUILayout.Button(I18n.T("opt.pos_last"), posFixed ? BlackWhiteSkin.TabStyle : BlackWhiteSkin.TabActiveStyle,
-                GUILayout.MinWidth(180f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight)))
+                GUILayout.MinWidth(180f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight)) && posFixed)
             {
                 _cfg.PositionMode.Value = "lastPos";
+                SyncWorldPreference();
+                ClearTextFocus();
+                GUIUtility.ExitGUI();
             }
             GUILayout.Space(8f);
             if (GUILayout.Button(I18n.T("opt.pos_fixed"), posFixed ? BlackWhiteSkin.TabActiveStyle : BlackWhiteSkin.TabStyle,
-                GUILayout.MinWidth(180f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight)))
+                GUILayout.MinWidth(180f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight)) && !posFixed)
             {
                 _cfg.PositionMode.Value = "fixedPos";
+                SyncWorldPreference();
+                ClearTextFocus();
+                GUIUtility.ExitGUI();
             }
             GUILayout.FlexibleSpace();
             GUILayout.EndHorizontal();
@@ -903,14 +981,13 @@ namespace CasualtiesUnknown.SaveManager
 
             if (posFixed)
             {
-                _fixedXCache = _fixedXCache ?? _cfg.FixedX.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                _fixedYCache = _fixedYCache ?? _cfg.FixedY.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                _fixedXCache = _fixedXCache ?? _cfg.FixedX.Value.ToString(CultureInfo.InvariantCulture);
+                _fixedYCache = _fixedYCache ?? _cfg.FixedY.Value.ToString(CultureInfo.InvariantCulture);
                 DrawFloatField(I18n.T("lbl.fixed_x"), ref _fixedXCache, _cfg.FixedX);
                 DrawFloatField(I18n.T("lbl.fixed_y"), ref _fixedYCache, _cfg.FixedY);
             }
 
-            WorldEngineArbiter.SyncPreference(_cfg.PreferredEngine.Value, _cfg.SeedInput.Value,
-                _cfg.PositionMode.Value, _cfg.FixedX.Value, _cfg.FixedY.Value);
+            SyncWorldPreference();
         }
 
         private static void DrawFloatField(string label, ref string cache, ConfigEntry<float> entry)
@@ -922,8 +999,7 @@ namespace CasualtiesUnknown.SaveManager
             if (next != cache)
             {
                 cache = next;
-                if (float.TryParse(next, System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out float v))
+                if (float.TryParse(next, NumberStyles.Float, CultureInfo.InvariantCulture, out float v))
                 {
                     entry.Value = v;
                 }
@@ -933,7 +1009,6 @@ namespace CasualtiesUnknown.SaveManager
             GUILayout.Space(6f);
         }
 
-        /// <summary>左右开关：标签 + [开] / [关] 两按钮，当前态加白色边框高亮。</summary>
         private static bool DrawSwitch(string label, bool value)
         {
             GUILayout.BeginHorizontal();
@@ -942,7 +1017,6 @@ namespace CasualtiesUnknown.SaveManager
             GUILayout.Space(20f);
 
             bool result = value;
-
             var onStyle = value ? BlackWhiteSkin.TabActiveStyle : BlackWhiteSkin.TabStyle;
             var offStyle = value ? BlackWhiteSkin.TabStyle : BlackWhiteSkin.TabActiveStyle;
 
@@ -965,41 +1039,40 @@ namespace CasualtiesUnknown.SaveManager
 
         private static void DrawLanguageModeRow(string label, ConfigEntry<string> entry)
         {
-            string mode = NormalizeLanguageMode(entry.Value);
+            string mode = I18n.NormalizeLanguageMode(entry.Value);
             GUILayout.BeginHorizontal();
             GUILayout.Label(label, GUILayout.MinWidth(LabelColW), GUILayout.ExpandWidth(false),
                 GUILayout.MinHeight(RowMinHeight));
             GUILayout.Space(20f);
             if (GUILayout.Button(I18n.T("opt.language_auto"),
                 mode == "auto" ? BlackWhiteSkin.TabActiveStyle : BlackWhiteSkin.TabStyle,
-                GUILayout.MinWidth(140f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight)))
+                GUILayout.MinWidth(140f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight)) && mode != "auto")
             {
                 entry.Value = "auto";
+                MenuButtonUiInjector.RefreshButtonText();
+                GUIUtility.ExitGUI();
             }
             GUILayout.Space(8f);
             if (GUILayout.Button(I18n.T("opt.language_zh"),
                 mode == "zh" ? BlackWhiteSkin.TabActiveStyle : BlackWhiteSkin.TabStyle,
-                GUILayout.MinWidth(120f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight)))
+                GUILayout.MinWidth(120f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight)) && mode != "zh")
             {
                 entry.Value = "zh";
+                MenuButtonUiInjector.RefreshButtonText();
+                GUIUtility.ExitGUI();
             }
             GUILayout.Space(8f);
             if (GUILayout.Button(I18n.T("opt.language_en"),
                 mode == "en" ? BlackWhiteSkin.TabActiveStyle : BlackWhiteSkin.TabStyle,
-                GUILayout.MinWidth(120f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight)))
+                GUILayout.MinWidth(120f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight)) && mode != "en")
             {
                 entry.Value = "en";
+                MenuButtonUiInjector.RefreshButtonText();
+                GUIUtility.ExitGUI();
             }
             GUILayout.FlexibleSpace();
             GUILayout.EndHorizontal();
             GUILayout.Space(6f);
-        }
-
-        private static string NormalizeLanguageMode(string mode)
-        {
-            if (string.IsNullOrWhiteSpace(mode)) return "auto";
-            mode = mode.Trim().ToLowerInvariant();
-            return mode == "zh" || mode == "en" ? mode : "auto";
         }
 
         private static void DrawFloatSlider(string label, ConfigEntry<float> entry, float min, float max,
@@ -1055,7 +1128,7 @@ namespace CasualtiesUnknown.SaveManager
 
         private void CaptureKeyDownIfNeeded()
         {
-            if (!(_capturingSettingsKey || _capturingSlotsKey || _capturingQuickKey)) return;
+            if (!IsCapturingKey) return;
             var ev = Event.current;
             if (ev.type != EventType.KeyDown || ev.keyCode == KeyCode.None) return;
             if (ev.keyCode == KeyCode.Escape)

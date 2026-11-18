@@ -10,18 +10,10 @@ using UnityEngine;
 
 namespace CasualtiesUnknown.SaveManager.Interop
 {
-    /// <summary>Casualties: Together 的提供方适配器，全程通过反射访问目标程序集。</summary>
+    /// <summary>Casualties: Together（CasualtiesMP.dll 5.5.3，GUID "CasualtiesMP"）反射提供方适配器。</summary>
     /// <remarks>
-    /// 目标程序集：CasualtiesMP.dll，BepInEx 插件 GUID "CasualtiesMP"，版本 5.5.0。
-    /// 依赖的目标类型：Together.Net、Together.Multiplayer、Together.NetBody、Together.ScavPlayer、Together.knetid、Together.Plugin、Together.ServerMain、Together.WorldMP。
-    /// 写入器与读取器类型不直接出现：写入器类型取自 Together.Multiplayer.CreateNamedWriter(string) 的返回类型，
-    /// 读取器类型取自 Together.Multiplayer.RegisterCustomServerReceiver 第 2 个形参的泛型实参，传输模式枚举取自 Together.Net.Client_Send 的第 1 个形参类型。
-    /// 发送方法形参带 in，反射得到的是 by-ref 类型，因此成员一律按「名称 + 形参个数 + 剥掉 in/ref 后的元素类型」匹配。
-    /// 契约能力（会话 / 名册 / 通道 / 事件 / 类型解析）依赖的成员缺失时整个提供方判为不可用；
-    /// 契约未覆盖的联机模组专有能力（专用服务端、模组初始化状态、持久 ID、传送、死亡计数、广播提示、状态日志、继续游戏）
-    /// 依赖的成员单独解析，缺失只关闭对应能力，不影响其余能力。
-    /// 目标程序集尚未加载不计入失败，下次访问重试；成员缺失项只在首次解析后警告一次。
-    /// 16 位原语（写入器 Put(ushort)、读取器 GetUShort()）例外：缺失时只降级该原语，提供方与其余能力保持可用。
+    /// 依赖类型：Together.Net / Multiplayer / NetBody / ScavPlayer / knetid / Plugin / ServerMain / WorldMP / SavesystemPatch。
+    /// 契约能力缺失时整体不可用；扩展能力与 16 位读写原语缺失时仅单项降级。
     /// </remarks>
     internal sealed class TogetherProvider : IInteropProvider, IInteropSession, IInteropRoster, IInteropChannel, IInteropEvents, IInteropTypeRegistry
     {
@@ -30,8 +22,7 @@ namespace CasualtiesUnknown.SaveManager.Interop
         private readonly object _sync = new object();
         private readonly List<Delegate> _callbacks = new List<Delegate>();
 
-        // 三个标志在锁内写、锁外读（EnsureResolved 的双检锁），必须带 volatile：
-        // 锁外读取只做 acquire，否则看到 _resolved 为 true 时其余成员字段仍可能不可见，表现为静默丢包。
+        // 双检锁标志：锁外读取需 acquire 语义以确保已解析成员字段可见。
         private volatile bool _resolved;
         private volatile bool _available;
         private volatile bool _ushortDegraded;
@@ -62,19 +53,24 @@ namespace CasualtiesUnknown.SaveManager.Interop
         private PropertyInfo _scavPlayerId;
         private FieldInfo _scavSteamId;
         private FieldInfo _scavPlayerName;
+        private FieldInfo _scavSelectedCharacter;
         private FieldInfo _scavClientIdToPlayerDict;
         private FieldInfo _scavBodyToPlayerDict;
         private FieldInfo _scavAllLivingPlayers;
+        private FieldInfo _scavAllDeadPlayers;
         private EventInfo _scavPlayerJoined;
         private EventInfo _scavPlayerLeft;
         private MethodInfo _scavGetPersistentId;
         private MethodInfo _scavTeleportCharacter;
 
         private PropertyInfo _serverAllClientIds;
+        private PropertyInfo _serverAllClientIdsExceptHost;
         private MethodInfo _serverAnnounceAlert;
+        private MethodInfo _serverCheckLayerFinish;
 
         private MethodInfo _multiplayerStatusLog;
         private MethodInfo _worldLoadVanillaGeneratedWorld;
+        private MemberInfo _savesystemPendingLoadMpSave;
 
         private FieldInfo _knetidId;
         private ConstructorInfo _knetidCtor;
@@ -99,13 +95,12 @@ namespace CasualtiesUnknown.SaveManager.Interop
         private object _deliveryUnreliable;
 
         /// <inheritdoc/>
-        /// <remarks>16 位原语降级时名称附标记，启动自检行据此输出 Together(ushort降级):ok。</remarks>
         string IInteropProvider.Name => _ushortDegraded ? "Together(ushort降级)" : "Together";
 
         /// <inheritdoc/>
         bool IInteropProvider.IsAvailable => EnsureResolved();
 
-        /// <summary>目标程序集与契约能力依赖的成员是否全部解析到。</summary>
+        /// <summary>目标程序集与契约能力依赖成员是否全部可用。</summary>
         internal bool IsPresent => EnsureResolved();
 
         /// <inheritdoc/>
@@ -124,11 +119,7 @@ namespace CasualtiesUnknown.SaveManager.Interop
         {
             get
             {
-                if (!EnsureResolved())
-                {
-                    return InteropSessionInfo.None;
-                }
-
+                if (!EnsureResolved()) return InteropSessionInfo.None;
                 bool running = ReadBool(_netIsRunning);
                 bool server = ReadBool(_netIsServer);
                 InteropTransport transport = running
@@ -143,11 +134,7 @@ namespace CasualtiesUnknown.SaveManager.Interop
         {
             get
             {
-                if (!EnsureResolved())
-                {
-                    return InteropPlayerRef.None;
-                }
-
+                if (!EnsureResolved()) return InteropPlayerRef.None;
                 object local = InteropReflection.ReadMember(_scavLocalPlayer, null);
                 return local == null ? InteropPlayerRef.None : ToRef(local, true);
             }
@@ -157,11 +144,7 @@ namespace CasualtiesUnknown.SaveManager.Interop
         bool IInteropRoster.TryGetPlayer(ushort clientId, out InteropPlayerRef player)
         {
             player = InteropPlayerRef.None;
-            if (!EnsureResolved() || !TryReadPlayer(clientId, out object raw))
-            {
-                return false;
-            }
-
+            if (!EnsureResolved() || !TryReadPlayer(clientId, out object raw)) return false;
             player = ToRef(raw, clientId, IsLocalPlayer(raw));
             return true;
         }
@@ -170,64 +153,37 @@ namespace CasualtiesUnknown.SaveManager.Interop
         IReadOnlyList<InteropPlayerRef> IInteropRoster.GetPlayers()
         {
             List<InteropPlayerRef> players = new List<InteropPlayerRef>();
-            if (!EnsureResolved())
-            {
-                return players;
-            }
+            if (!EnsureResolved()) return players;
 
             IDictionary dictionary = ReadClientIdToPlayerDict();
-            if (dictionary == null)
-            {
-                return players;
-            }
+            if (dictionary == null) return players;
 
             object local = InteropReflection.ReadMember(_scavLocalPlayer, null);
             foreach (DictionaryEntry entry in dictionary)
             {
-                if (entry.Value == null)
-                {
-                    continue;
-                }
-
+                if (entry.Value == null) continue;
                 players.Add(ToRef(entry.Value, ReadClientId(entry.Key), ReferenceEquals(entry.Value, local)));
             }
 
             return players;
         }
 
-        /// <remarks>角色对象可以是目标插件的 NetBody，也可以是 NetBody.body 指向的身体对象。</remarks>
+        /// <inheritdoc/>
         bool IInteropRoster.TryGetPlayerByActor(object actor, out InteropPlayerRef player)
         {
             player = InteropPlayerRef.None;
-            if (actor == null || !EnsureResolved())
-            {
-                return false;
-            }
+            if (actor == null || !EnsureResolved()) return false;
 
             IDictionary dictionary = ReadClientIdToPlayerDict();
-            if (dictionary == null)
-            {
-                return false;
-            }
+            if (dictionary == null) return false;
 
             object local = InteropReflection.ReadMember(_scavLocalPlayer, null);
             foreach (DictionaryEntry entry in dictionary)
             {
                 object[] args = { entry.Key, null, null };
-                if (!InteropReflection.TryInvoke(_tryGetPlayerAndNetBody, null, args, out object result))
-                {
-                    continue;
-                }
-
-                if (!(result is bool found) || !found || args[2] == null)
-                {
-                    continue;
-                }
-
-                if (!ReferenceEquals(args[2], actor) && !ReferenceEquals(InteropReflection.ReadMember(_netBodyBody, args[2]), actor))
-                {
-                    continue;
-                }
+                if (!InteropReflection.TryInvoke(_tryGetPlayerAndNetBody, null, args, out object result)) continue;
+                if (!(result is bool found) || !found || args[2] == null) continue;
+                if (!ReferenceEquals(args[2], actor) && !ReferenceEquals(InteropReflection.ReadMember(_netBodyBody, args[2]), actor)) continue;
 
                 player = ToRef(args[1], ReadClientId(entry.Key), ReferenceEquals(args[1], local));
                 return true;
@@ -239,11 +195,7 @@ namespace CasualtiesUnknown.SaveManager.Interop
         /// <inheritdoc/>
         IInteropWriter IInteropChannel.CreateWriter(string channel)
         {
-            if (string.IsNullOrEmpty(channel) || !EnsureResolved())
-            {
-                return NullInteropWriter.Instance;
-            }
-
+            if (string.IsNullOrEmpty(channel) || !EnsureResolved()) return NullInteropWriter.Instance;
             if (!InteropReflection.TryInvoke(_createNamedWriter, null, new object[] { channel }, out object writer) || writer == null)
             {
                 return NullInteropWriter.Instance;
@@ -252,55 +204,39 @@ namespace CasualtiesUnknown.SaveManager.Interop
             return new TogetherWriter(this, writer);
         }
 
-        /// <remarks>可靠标志映射到传输模式枚举的 ReliableOrdered 与 Unreliable 成员。</remarks>
+        /// <inheritdoc/>
         void IInteropChannel.SendToServer(IInteropWriter writer, bool reliable)
         {
             object native = ReadWriter(writer);
-            if (native == null || !EnsureResolved())
-            {
-                return;
-            }
-
+            if (native == null || !EnsureResolved()) return;
             object delivery = reliable ? _deliveryReliable : _deliveryUnreliable;
-            InteropReflection.TryInvoke(_netClientSend, null, new object[] { delivery, native }, out object ignored);
+            InteropReflection.TryInvoke(_netClientSend, null, new object[] { delivery, native }, out _);
         }
 
-        /// <remarks>广播目标优先取自 Together.ServerMain.AllClientIds，该成员缺失时回落到 Together.ScavPlayer.ClientIdToPlayerDict 的键集合。</remarks>
+        /// <inheritdoc/>
         void IInteropChannel.Broadcast(IInteropWriter writer, bool reliable)
         {
             object native = ReadWriter(writer);
-            if (native == null || !EnsureResolved())
-            {
-                return;
-            }
+            if (native == null || !EnsureResolved()) return;
 
             object clientIds = InteropReflection.ReadMember(_serverAllClientIds, null) ?? BuildClientIdArray();
-            if (clientIds == null)
-            {
-                return;
-            }
+            if (clientIds == null) return;
 
             object delivery = reliable ? _deliveryReliable : _deliveryUnreliable;
-            InteropReflection.TryInvoke(_netServerSendToClients, null, new object[] { delivery, native, clientIds }, out object ignored);
+            InteropReflection.TryInvoke(_netServerSendToClients, null, new object[] { delivery, native, clientIds }, out _);
         }
 
         /// <inheritdoc/>
         void IInteropChannel.SendToClient(ushort clientId, IInteropWriter writer, bool reliable)
         {
             object native = ReadWriter(writer);
-            if (native == null || !EnsureResolved())
-            {
-                return;
-            }
+            if (native == null || !EnsureResolved()) return;
 
             object id = MakeKnetid(clientId);
-            if (id == null)
-            {
-                return;
-            }
+            if (id == null) return;
 
             object delivery = reliable ? _deliveryReliable : _deliveryUnreliable;
-            InteropReflection.TryInvoke(_netServerSendTo, null, new object[] { delivery, native, id }, out object ignored);
+            InteropReflection.TryInvoke(_netServerSendTo, null, new object[] { delivery, native, id }, out _);
         }
 
         /// <inheritdoc/>
@@ -312,223 +248,165 @@ namespace CasualtiesUnknown.SaveManager.Interop
             }
 
             bool registered = true;
-            if (onServer != null)
-            {
-                registered &= RegisterServerReceiver(channel, onServer);
-            }
-
-            if (onClient != null)
-            {
-                registered &= RegisterClientReceiver(channel, onClient);
-            }
-
+            if (onServer != null) registered &= RegisterServerReceiver(channel, onServer);
+            if (onClient != null) registered &= RegisterClientReceiver(channel, onClient);
             return registered;
         }
 
-        /// <summary>订阅玩家加入；对应 Together.ScavPlayer.OnPlayerJoined。</summary>
+        /// <inheritdoc/>
         bool IInteropEvents.TrySubscribePlayerJoined(Action<InteropPlayerRef> handler)
         {
-            if (handler == null || !EnsureResolved() || _scavPlayerJoined == null)
-            {
-                return false;
-            }
+            if (handler == null || !EnsureResolved() || _scavPlayerJoined == null) return false;
 
             PlayerJoinedReceiver receiver = new PlayerJoinedReceiver(this, handler);
             MethodInfo callback = InteropReflection.FindMethod(typeof(PlayerJoinedReceiver), "Invoke", typeof(object));
             Delegate bound = InteropReflection.BindDelegate(_scavPlayerJoined.EventHandlerType, receiver, callback);
-            if (bound == null)
-            {
-                return false;
-            }
+            if (bound == null) return false;
 
-            try
-            {
-                _scavPlayerJoined.AddEventHandler(null, bound);
-            }
-            catch (Exception)
-            {
-                return false;
-            }
+            try { _scavPlayerJoined.AddEventHandler(null, bound); }
+            catch (Exception) { return false; }
 
-            _callbacks.Add(bound);
+            lock (_sync) { _callbacks.Add(bound); }
             return true;
         }
 
         /// <inheritdoc/>
         bool IInteropEvents.TrySubscribePlayerLeft(Action<InteropPlayerRef> handler)
         {
-            if (handler == null || !EnsureResolved())
-            {
-                return false;
-            }
+            if (handler == null || !EnsureResolved() || _scavPlayerLeft == null) return false;
 
             PlayerLeftReceiver receiver = new PlayerLeftReceiver(this, handler);
             MethodInfo callback = InteropReflection.FindMethod(typeof(PlayerLeftReceiver), "Invoke", typeof(object));
             Delegate bound = InteropReflection.BindDelegate(_scavPlayerLeft.EventHandlerType, receiver, callback);
-            if (bound == null)
-            {
-                return false;
-            }
+            if (bound == null) return false;
 
-            try
-            {
-                _scavPlayerLeft.AddEventHandler(null, bound);
-            }
-            catch (Exception)
-            {
-                return false;
-            }
+            try { _scavPlayerLeft.AddEventHandler(null, bound); }
+            catch (Exception) { return false; }
 
-            _callbacks.Add(bound);
+            lock (_sync) { _callbacks.Add(bound); }
             return true;
         }
 
-        /// <remarks>只用 Assembly.GetType 查目标程序集，不扫描 AppDomain；类型成员缺失时仍可解析类型。</remarks>
+        /// <inheritdoc/>
         bool IInteropTypeRegistry.TryResolveType(string fullName, out Type type)
         {
             type = null;
             EnsureResolved();
-            if (_assembly == null)
-            {
-                return false;
-            }
-
+            if (_assembly == null) return false;
             type = InteropReflection.FindType(_assembly, fullName);
             return type != null;
         }
 
-        /// <summary>联机会话是否运行；对应 Together.Net.IsRunning。</summary>
+        /// <summary>联机会话是否运行中（Together.Net.IsRunning）。</summary>
         internal bool IsRunning
         {
-            get
-            {
-                EnsureResolved();
-                return ReadBool(_netIsRunning);
-            }
+            get { EnsureResolved(); return ReadBool(_netIsRunning); }
         }
 
-        /// <summary>本端是否为服务端（主机或专用服务端）；对应 Together.Net.IsServer。</summary>
+        /// <summary>本端是否为服务端（Together.Net.IsServer）。</summary>
         internal bool IsServer
         {
-            get
-            {
-                EnsureResolved();
-                return ReadBool(_netIsServer);
-            }
+            get { EnsureResolved(); return ReadBool(_netIsServer); }
         }
 
-        /// <summary>本端是否为客户端；对应 Together.Net.IsClient。</summary>
+        /// <summary>本端是否为客户端（Together.Net.IsClient）。</summary>
         internal bool IsClient
         {
-            get
-            {
-                EnsureResolved();
-                return ReadBool(_netIsClient);
-            }
+            get { EnsureResolved(); return ReadBool(_netIsClient); }
         }
 
-        /// <summary>本端是否为专用服务端；对应 Together.Net.IsDedicatedServer。</summary>
+        /// <summary>本端是否为专用服务端（Together.Net.IsDedicatedServer）。</summary>
         internal bool IsDedicatedServer
         {
-            get
-            {
-                EnsureResolved();
-                return ReadBool(_netIsDedicatedServer);
-            }
+            get { EnsureResolved(); return ReadBool(_netIsDedicatedServer); }
         }
 
-        /// <summary>联机模组是否初始化成功且未被强制禁用；对应 Together.Plugin.SUCCESFULLY_INITIALIZED 与 Together.Plugin.FORCE_DISABLE_MP_MOD。</summary>
+        /// <summary>联机模组是否初始化完成且未被禁用（Together.Plugin.SUCCESFULLY_INITIALIZED / FORCE_DISABLE_MP_MOD）。</summary>
         internal bool IsModInitialized
         {
             get
             {
                 EnsureResolved();
-                if (!ReadBool(_pluginSuccessfullyInitialized))
-                {
-                    return false;
-                }
-
+                if (!ReadBool(_pluginSuccessfullyInitialized)) return false;
                 return _pluginForceDisableMod == null || !ReadBool(_pluginForceDisableMod);
             }
         }
 
-        /// <summary>联机模组程序集；目标程序集尚未加载时为 null。</summary>
+        /// <summary>联机模组程序集；尚未加载时为 null。</summary>
         internal Assembly ModAssembly
         {
-            get
+            get { EnsureResolved(); return _assembly; }
+        }
+
+        /// <summary>判断角色身体对象是否归属本机玩家；非联机时返回 true，专用服务端返回 false。</summary>
+        internal bool IsLocalPlayerBody(object body)
+        {
+            if (!IsRunning) return true;
+            if (IsDedicatedServer || body == null) return false;
+
+            object local = InteropReflection.ReadMember(_scavLocalPlayer, null);
+            if (local == null) return false;
+
+            if (InteropReflection.ReadMember(_scavBodyToPlayerDict, null) is IDictionary bodyDict && bodyDict.Contains(body))
             {
-                EnsureResolved();
-                return _assembly;
+                return ReferenceEquals(bodyDict[body], local);
+            }
+
+            return ((IInteropRoster)this).TryGetPlayerByActor(body, out InteropPlayerRef player)
+                && player.IsValid
+                && player.IsLocal;
+        }
+
+        /// <summary>写入 Together.SavesystemPatch.PendingLoadMpSave 静态标志。</summary>
+        internal void SetPendingLoadMpSave(bool value)
+        {
+            EnsureResolved();
+            MemberInfo member = _savesystemPendingLoadMpSave;
+            if (member == null && _assembly != null)
+            {
+                Type patchType = InteropReflection.FindType(_assembly, "Together.SavesystemPatch");
+                member = (MemberInfo)InteropReflection.FindField(patchType, "PendingLoadMpSave")
+                    ?? InteropReflection.FindProperty(patchType, "PendingLoadMpSave");
+            }
+
+            if (member != null)
+            {
+                InteropReflection.TryWriteMember(member, null, value);
             }
         }
 
-        /// <summary>本机玩家在联机模组里的持久 ID，用于定位 mp_save 下的玩家子目录。</summary>
-        /// <remarks>
-        /// 链路：Together.ScavPlayer.LocalPlayer → Together.ScavPlayer.GetPersistentId()。
-        /// 该方法在 Steam 传输下返回 "STEAM_&lt;steamId&gt;"，其它传输下返回 "NAME_&lt;playerName 的十六进制&gt;"。
-        /// 不区分服务端与客户端：主机同样需要自己的存档子目录。
-        /// </remarks>
+        /// <summary>获取本机玩家的联机持久 ID（Together.ScavPlayer.LocalPlayer.GetPersistentId()）。</summary>
         internal bool TryGetLocalPersistentId(out string persistentId)
         {
             persistentId = null;
             EnsureResolved();
             object local = InteropReflection.ReadMember(_scavLocalPlayer, null);
-            if (local == null || _scavGetPersistentId == null)
-            {
-                return false;
-            }
-
-            if (!InteropReflection.TryInvoke(_scavGetPersistentId, local, Array.Empty<object>(), out object result))
-            {
-                return false;
-            }
-
+            if (local == null || _scavGetPersistentId == null) return false;
+            if (!InteropReflection.TryInvoke(_scavGetPersistentId, local, Array.Empty<object>(), out object result)) return false;
             persistentId = result as string;
             return !string.IsNullOrEmpty(persistentId);
         }
 
-        /// <summary>当前会话内全部玩家的身份快照（持久 ID / Steam ID / 玩家名）。</summary>
-        /// <remarks>
-        /// 链路：Together.ScavPlayer.ClientIdToPlayerDict → Together.ScavPlayer.GetPersistentId() /
-        /// Together.ScavPlayer.SteamId / Together.ScavPlayer.playerName。
-        /// 持久 ID 与 mp_save/&lt;persistentId&gt;/save.sv 的目录名、mp_rules.json 里 PLRPOS 的键同源，
-        /// 供回档前把槽位里记录的旧持久 ID 映射到本场会话。提供方不可用、名册为空或持久 ID 取不到时返回空列表。
-        /// </remarks>
+        /// <summary>获取当前会话内全部玩家的身份快照（持久 ID / Steam ID / 玩家名）。</summary>
         internal List<InteropPlayerIdentity> GetPlayerIdentities()
         {
             List<InteropPlayerIdentity> identities = new List<InteropPlayerIdentity>();
             EnsureResolved();
-            if (_scavGetPersistentId == null)
-            {
-                return identities;
-            }
+            if (_scavGetPersistentId == null) return identities;
 
             IDictionary players = ReadClientIdToPlayerDict();
-            if (players == null)
-            {
-                return identities;
-            }
+            if (players == null) return identities;
 
             object local = InteropReflection.ReadMember(_scavLocalPlayer, null);
             HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
             foreach (DictionaryEntry entry in players)
             {
                 object player = entry.Value;
-                if (player == null)
-                {
-                    continue;
-                }
-
-                if (!InteropReflection.TryInvoke(_scavGetPersistentId, player, Array.Empty<object>(), out object result))
-                {
-                    continue;
-                }
+                if (player == null) continue;
+                if (!InteropReflection.TryInvoke(_scavGetPersistentId, player, Array.Empty<object>(), out object result)) continue;
 
                 string persistentId = result as string;
-                if (string.IsNullOrEmpty(persistentId) || !seen.Add(persistentId))
-                {
-                    continue;
-                }
+                if (string.IsNullOrEmpty(persistentId) || !seen.Add(persistentId)) continue;
 
                 object steamId = InteropReflection.ReadMember(_scavSteamId, player);
                 string playerName = InteropReflection.ReadMember(_scavPlayerName, player) as string;
@@ -543,48 +421,28 @@ namespace CasualtiesUnknown.SaveManager.Interop
             return identities;
         }
 
-        /// <summary>服务端按持久 ID 把玩家传送到指定坐标，返回实际传送人数。</summary>
-        /// <remarks>链路：Together.ScavPlayer.BodyToPlayerDict → Together.ScavPlayer.GetPersistentId() → Together.ScavPlayer.Server_TeleportCharacter(Vector2)。</remarks>
+        /// <summary>服务端按持久 ID 传送玩家（Together.ScavPlayer.Server_TeleportCharacter），返回实际成功人数。</summary>
         internal int RestorePlayerPositions(IReadOnlyDictionary<string, Vector2> positions)
         {
-            if (positions == null || positions.Count == 0 || !IsRunning || !IsServer)
-            {
-                return 0;
-            }
+            if (positions == null || positions.Count == 0 || !IsRunning || !IsServer) return 0;
 
             EnsureResolved();
-            if (_scavGetPersistentId == null || _scavTeleportCharacter == null)
-            {
-                return 0;
-            }
+            if (_scavGetPersistentId == null || _scavTeleportCharacter == null) return 0;
 
             IDictionary players = InteropReflection.ReadMember(_scavBodyToPlayerDict, null) as IDictionary;
-            if (players == null)
-            {
-                return 0;
-            }
+            if (players == null) return 0;
 
             int restored = 0;
             foreach (DictionaryEntry entry in players)
             {
                 object player = entry.Value;
-                if (player == null)
-                {
-                    continue;
-                }
-
-                if (!InteropReflection.TryInvoke(_scavGetPersistentId, player, Array.Empty<object>(), out object result))
-                {
-                    continue;
-                }
+                if (player == null) continue;
+                if (!InteropReflection.TryInvoke(_scavGetPersistentId, player, Array.Empty<object>(), out object result)) continue;
 
                 string persistentId = result as string;
-                if (string.IsNullOrEmpty(persistentId) || !positions.TryGetValue(persistentId, out Vector2 position))
-                {
-                    continue;
-                }
+                if (string.IsNullOrEmpty(persistentId) || !positions.TryGetValue(persistentId, out Vector2 position)) continue;
 
-                if (InteropReflection.TryInvoke(_scavTeleportCharacter, player, new object[] { position }, out object ignored))
+                if (InteropReflection.TryInvoke(_scavTeleportCharacter, player, new object[] { position }, out _))
                 {
                     restored++;
                 }
@@ -593,42 +451,44 @@ namespace CasualtiesUnknown.SaveManager.Interop
             return restored;
         }
 
-        /// <summary>已死亡玩家数 = Together.ScavPlayer.BodyToPlayerDict 的条目数减 Together.ScavPlayer.AllLivingPlayers 的条目数。</summary>
+        /// <summary>统计已死亡玩家数：优先读 Together.ScavPlayer.AllDeadPlayers，缺失时回退 BodyToPlayerDict 与 AllLivingPlayers 差值。</summary>
         internal int CountDeadPlayers()
         {
             EnsureResolved();
-            IDictionary allPlayers = InteropReflection.ReadMember(_scavBodyToPlayerDict, null) as IDictionary;
-            ICollection livingPlayers = InteropReflection.ReadMember(_scavAllLivingPlayers, null) as ICollection;
-            if (allPlayers == null || livingPlayers == null)
+            if (InteropReflection.ReadMember(_scavAllDeadPlayers, null) is ICollection deadPlayers)
             {
-                return 0;
+                return deadPlayers.Count;
             }
 
+            IDictionary allPlayers = InteropReflection.ReadMember(_scavBodyToPlayerDict, null) as IDictionary;
+            ICollection livingPlayers = InteropReflection.ReadMember(_scavAllLivingPlayers, null) as ICollection;
+            if (allPlayers == null || livingPlayers == null) return 0;
             return Math.Max(0, allPlayers.Count - livingPlayers.Count);
         }
 
-        /// <summary>服务端广播屏幕中央大字提示；对应 Together.ServerMain.Server_AnnounceAlert(string, bool, bool, IReadOnlyList&lt;knetid&gt;)。</summary>
-        /// <remarks>目标接收列表传 null，由目标方法自己回落到全部客户端。仅服务端且在会话运行时发送。</remarks>
-        internal bool TryAnnounceAlert(string message)
+        /// <summary>统计当前存活玩家数（Together.ScavPlayer.AllLivingPlayers）；不可用时返回 -1。</summary>
+        internal int CountLivingPlayers()
         {
-            if (string.IsNullOrEmpty(message) || !IsRunning || !IsServer)
-            {
-                return false;
-            }
-
             EnsureResolved();
-            if (_serverAnnounceAlert == null)
+            if (InteropReflection.ReadMember(_scavAllLivingPlayers, null) is ICollection livingPlayers)
             {
-                return false;
+                return livingPlayers.Count;
             }
 
-            return InteropReflection.TryInvoke(_serverAnnounceAlert, null, new object[] { message, true, true, null }, out object ignored);
+            return -1;
         }
 
-        /// <summary>走联机模组的读档继续游戏流程；对应 Together.WorldMP.LoadVanillaGeneratedWorld(bool)。</summary>
-        /// <remarks>
-        /// 目标成员存在时直接调用；缺失时记一次警告并返回 false，调用方保持原状（不改变场景）。
-        /// </remarks>
+        /// <summary>服务端向远端客户端广播中央大字提示（Together.ServerMain.Server_AnnounceAlert）；P2P 主机排除自身避免双倍弹窗。</summary>
+        internal bool TryAnnounceAlert(string message)
+        {
+            if (string.IsNullOrEmpty(message) || !IsRunning || !IsServer) return false;
+            EnsureResolved();
+            if (_serverAnnounceAlert == null) return false;
+            object targets = IsDedicatedServer ? null : InteropReflection.ReadMember(_serverAllClientIdsExceptHost, null);
+            return InteropReflection.TryInvoke(_serverAnnounceAlert, null, new object[] { message, true, true, targets }, out _);
+        }
+
+        /// <summary>调用联机继续游戏入口（Together.WorldMP.LoadVanillaGeneratedWorld）。</summary>
         internal bool TryContinueGame(bool loadsave)
         {
             EnsureResolved();
@@ -644,15 +504,11 @@ namespace CasualtiesUnknown.SaveManager.Interop
             return invoked;
         }
 
-        /// <summary>把角色写回联机模组的本地玩家（Together.ScavPlayer.selectedCharacter）。</summary>
-        /// <remarks>
-        /// Together 在 PlayerCamera.Awake 前会用 ScavPlayer.LocalPlayer.selectedCharacter 覆盖 PreRunScript.characterSelected，
-        /// 只写后者会被盖回默认值，所以读档兜底必须两边一起写。
-        /// 本地玩家尚未建立（未连上 / 已离开）或成员缺失时返回 false，由调用方决定是否只写 PreRunScript。
-        /// 取值 0=Experiment / 1=Milky / 2=Dune；目标的实际字段类型是 byte，这里显式转换后再写入。
-        /// </remarks>
+        /// <summary>将选定角色编号写入本机玩家（Together.ScavPlayer.selectedCharacter，byte 范围 0..255）。</summary>
         internal bool TryApplyCharacterToLocalPlayer(int character)
         {
+            if (character < 0 || character > byte.MaxValue) return false;
+
             EnsureResolved();
             object local = InteropReflection.ReadMember(_scavLocalPlayer, null);
             if (local == null)
@@ -661,15 +517,14 @@ namespace CasualtiesUnknown.SaveManager.Interop
                 return false;
             }
 
-            MemberInfo member = InteropReflection.FindField(local.GetType(), "selectedCharacter");
-            if (member == null)
+            if (_scavSelectedCharacter == null)
             {
                 InteropDiagnostics.WarnOnce("TogetherProvider.selectedCharacter",
-                    "Together.ScavPlayer.selectedCharacter 未解析到，读档角色兜底只能写 PreRunScript（可能被 Together 覆盖回默认角色）");
+                    "Together.ScavPlayer.selectedCharacter 未解析到，无法同步联机本机玩家角色");
                 return false;
             }
 
-            if (!InteropReflection.TryWriteMember(member, local, (byte)character))
+            if (!InteropReflection.TryWriteMember(_scavSelectedCharacter, local, (byte)character))
             {
                 ModLog.Warning("TryApplyCharacterToLocalPlayer：写入 ScavPlayer.selectedCharacter 失败");
                 return false;
@@ -678,19 +533,32 @@ namespace CasualtiesUnknown.SaveManager.Interop
             return true;
         }
 
-        /// <summary>把一条状态消息写进联机模组的日志；对应 Together.Multiplayer.DoMultiplayerStatusMessageLog(string)。</summary>
+        /// <summary>写入联机状态消息日志（Together.Multiplayer.DoMultiplayerStatusMessageLog）。</summary>
         internal bool TryLogStatusMessage(string message)
         {
             EnsureResolved();
-            if (_multiplayerStatusLog == null || string.IsNullOrEmpty(message))
+            if (_multiplayerStatusLog == null || string.IsNullOrEmpty(message)) return false;
+            return InteropReflection.TryInvoke(_multiplayerStatusLog, null, new object[] { message }, out _);
+        }
+
+        /// <summary>服务端判定全队是否满足层底过层人数阈值（Together.ServerMain.CheckIfEnoughPeopleAreAtLayerFinish()）。</summary>
+        internal bool TryCheckTeamAtLayerFinish(out bool atFinish)
+        {
+            atFinish = false;
+            if (!IsRunning || !IsServer) return false;
+            EnsureResolved();
+            if (_serverCheckLayerFinish == null) return false;
+            if (!InteropReflection.TryInvoke(_serverCheckLayerFinish, null, Array.Empty<object>(), out object result)
+                || !(result is bool flag))
             {
                 return false;
             }
 
-            return InteropReflection.TryInvoke(_multiplayerStatusLog, null, new object[] { message }, out object ignored);
+            atFinish = flag;
+            return true;
         }
 
-        /// <summary>一行摘要，列出各依赖成员的解析结果，用于启动日志与版本变动时的排查。</summary>
+        /// <summary>返回各依赖成员的解析状态摘要。</summary>
         internal string DescribeResolvedMembers()
         {
             EnsureResolved();
@@ -705,40 +573,35 @@ namespace CasualtiesUnknown.SaveManager.Interop
                 + " Together.ScavPlayer.playerId=" + State(_scavPlayerId)
                 + " Together.ScavPlayer.SteamId=" + State(_scavSteamId)
                 + " Together.ScavPlayer.playerName=" + State(_scavPlayerName)
+                + " Together.ScavPlayer.selectedCharacter=" + State(_scavSelectedCharacter)
                 + " Together.ScavPlayer.ClientIdToPlayerDict=" + State(_scavClientIdToPlayerDict)
                 + " Together.ScavPlayer.BodyToPlayerDict=" + State(_scavBodyToPlayerDict)
                 + " Together.ScavPlayer.AllLivingPlayers=" + State(_scavAllLivingPlayers)
+                + " Together.ScavPlayer.AllDeadPlayers=" + State(_scavAllDeadPlayers)
                 + " Together.ScavPlayer.GetPersistentId=" + State(_scavGetPersistentId)
                 + " Together.ScavPlayer.Server_TeleportCharacter=" + State(_scavTeleportCharacter)
                 + " Together.ScavPlayer.OnPlayerJoined=" + State(_scavPlayerJoined)
                 + " Together.ScavPlayer.OnPlayerLeft=" + State(_scavPlayerLeft)
                 + " Together.ServerMain.AllClientIds=" + State(_serverAllClientIds)
+                + " Together.ServerMain.AllClientIdsExceptHost=" + State(_serverAllClientIdsExceptHost)
                 + " Together.ServerMain.Server_AnnounceAlert=" + State(_serverAnnounceAlert)
+                + " Together.ServerMain.CheckIfEnoughPeopleAreAtLayerFinish=" + State(_serverCheckLayerFinish)
                 + " Together.Multiplayer.DoMultiplayerStatusMessageLog=" + State(_multiplayerStatusLog)
-                + " Together.WorldMP.LoadVanillaGeneratedWorld=" + State(_worldLoadVanillaGeneratedWorld);
+                + " Together.WorldMP.LoadVanillaGeneratedWorld=" + State(_worldLoadVanillaGeneratedWorld)
+                + " Together.SavesystemPatch.PendingLoadMpSave=" + State(_savesystemPendingLoadMpSave);
         }
 
-        /// <summary>首次访问时解析目标程序集及全部依赖成员并缓存；目标程序集尚未加载时不置缓存，下次访问重试。</summary>
-        /// <remarks>目标程序集不存在属于可选场景，不计失败也不记警告；成员解析失败后缓存并只警告一次，重新解析走 <see cref="TryRefresh"/> 显式入口。</remarks>
+        /// <summary>首次访问时解析目标程序集及依赖成员并缓存；程序集尚未加载时不缓存以便后续重试。</summary>
         private bool EnsureResolved()
         {
-            if (_resolved)
-            {
-                return _available;
-            }
+            if (_resolved) return _available;
 
             lock (_sync)
             {
-                if (_resolved)
-                {
-                    return _available;
-                }
+                if (_resolved) return _available;
 
                 Assembly assembly = FindTargetAssembly();
-                if (assembly == null)
-                {
-                    return false;
-                }
+                if (assembly == null) return false;
 
                 List<string> missing = new List<string>();
                 List<string> optionalMissing = new List<string>();
@@ -758,14 +621,12 @@ namespace CasualtiesUnknown.SaveManager.Interop
                     ReportPrimitiveDegradation();
                 }
 
-                // 标志最后发布：锁外的读者看到 _resolved 为 true 时，此前写入的成员字段与降级标志均已可见。
                 _resolved = true;
             }
 
             return _available;
         }
 
-        /// <summary>16 位原语缺失时各警告一次；降级只影响该原语，提供方整体仍可用。</summary>
         private void ReportPrimitiveDegradation()
         {
             _ushortDegraded = _putUShort == null || _getUShort == null;
@@ -780,20 +641,82 @@ namespace CasualtiesUnknown.SaveManager.Interop
             }
         }
 
-        /// <summary>丢弃已缓存的解析结果并重新解析，用于目标插件晚加载或成员变化后的显式重试。</summary>
+        /// <summary>清空已缓存的反射成员并重新解析。</summary>
         internal bool TryRefresh()
         {
-            ModLog.Debug("Together：TryRefresh 被调用，丢弃已缓存的解析结果并重新解析");
+            ModLog.Debug("Together：TryRefresh 清空缓存并重新解析");
             lock (_sync)
             {
                 _resolved = false;
                 _available = false;
+                _ushortDegraded = false;
+                ClearCachedMembers();
             }
 
             return EnsureResolved();
         }
 
-        /// <summary>解析目标程序集的全部依赖成员：<paramref name="missing"/> 记失败项（导致提供方不可用），<paramref name="optionalMissing"/> 记只关闭单项能力的缺失。</summary>
+        private void ClearCachedMembers()
+        {
+            _assembly = null;
+            _knetidType = null;
+            _writerType = null;
+            _netIsRunning = null;
+            _netIsServer = null;
+            _netIsClient = null;
+            _netIsDedicatedServer = null;
+            _netIsRunningSteam = null;
+            _pluginSuccessfullyInitialized = null;
+            _pluginForceDisableMod = null;
+            _netClientSend = null;
+            _netServerSendTo = null;
+            _netServerSendToClients = null;
+            _createNamedWriter = null;
+            _registerServerReceiver = null;
+            _registerClientReceiver = null;
+            _netBodyBody = null;
+            _tryGetPlayerAndNetBody = null;
+            _scavLocalPlayer = null;
+            _scavPlayerId = null;
+            _scavSteamId = null;
+            _scavPlayerName = null;
+            _scavSelectedCharacter = null;
+            _scavClientIdToPlayerDict = null;
+            _scavBodyToPlayerDict = null;
+            _scavAllLivingPlayers = null;
+            _scavAllDeadPlayers = null;
+            _scavPlayerJoined = null;
+            _scavPlayerLeft = null;
+            _scavGetPersistentId = null;
+            _scavTeleportCharacter = null;
+            _serverAllClientIds = null;
+            _serverAllClientIdsExceptHost = null;
+            _serverAnnounceAlert = null;
+            _serverCheckLayerFinish = null;
+            _multiplayerStatusLog = null;
+            _worldLoadVanillaGeneratedWorld = null;
+            _savesystemPendingLoadMpSave = null;
+            _knetidId = null;
+            _knetidCtor = null;
+            _putInt = null;
+            _putUInt = null;
+            _putUShort = null;
+            _putBool = null;
+            _putFloat = null;
+            _putString = null;
+            _putBytes = null;
+            _getInt = null;
+            _getUInt = null;
+            _getUShort = null;
+            _getBool = null;
+            _getFloat = null;
+            _getString = null;
+            _getBytes = null;
+            _readerAvailableBytes = null;
+            _deliveryReliable = null;
+            _deliveryUnreliable = null;
+        }
+
         private bool Resolve(Assembly assembly, List<string> missing, List<string> optionalMissing)
         {
             _assembly = assembly;
@@ -867,8 +790,10 @@ namespace CasualtiesUnknown.SaveManager.Interop
             _scavPlayerLeft = Require(InteropReflection.FindEvent(scavPlayerType, "OnPlayerLeft"), "Together.ScavPlayer.OnPlayerLeft", missing);
             _scavGetPersistentId = Require(InteropReflection.FindMethod(scavPlayerType, "GetPersistentId"), "Together.ScavPlayer.GetPersistentId()", missing);
             _scavPlayerName = Optional(InteropReflection.FindField(scavPlayerType, "playerName"), "Together.ScavPlayer.playerName", optionalMissing);
+            _scavSelectedCharacter = Optional(InteropReflection.FindField(scavPlayerType, "selectedCharacter"), "Together.ScavPlayer.selectedCharacter", optionalMissing);
             _scavBodyToPlayerDict = Optional(InteropReflection.FindField(scavPlayerType, "BodyToPlayerDict"), "Together.ScavPlayer.BodyToPlayerDict", optionalMissing);
             _scavAllLivingPlayers = Optional(InteropReflection.FindField(scavPlayerType, "AllLivingPlayers"), "Together.ScavPlayer.AllLivingPlayers", optionalMissing);
+            _scavAllDeadPlayers = Optional(InteropReflection.FindField(scavPlayerType, "AllDeadPlayers"), "Together.ScavPlayer.AllDeadPlayers", optionalMissing);
             _scavPlayerJoined = Optional(InteropReflection.FindEvent(scavPlayerType, "OnPlayerJoined"), "Together.ScavPlayer.OnPlayerJoined", optionalMissing);
             _scavTeleportCharacter = Optional(InteropReflection.FindMethod(scavPlayerType, "Server_TeleportCharacter", typeof(Vector2)), "Together.ScavPlayer.Server_TeleportCharacter(Vector2)", optionalMissing);
 
@@ -880,9 +805,14 @@ namespace CasualtiesUnknown.SaveManager.Interop
             else
             {
                 _serverAllClientIds = Optional(InteropReflection.FindProperty(serverMainType, "AllClientIds"), "Together.ServerMain.AllClientIds", optionalMissing);
+                _serverAllClientIdsExceptHost = Optional(InteropReflection.FindProperty(serverMainType, "AllClientIdsExceptHost"), "Together.ServerMain.AllClientIdsExceptHost", optionalMissing);
                 _serverAnnounceAlert = Optional(
                     InteropReflection.FindMethod(serverMainType, "Server_AnnounceAlert", typeof(string), typeof(bool), typeof(bool), typeof(IReadOnlyList<>).MakeGenericType(_knetidType)),
                     "Together.ServerMain.Server_AnnounceAlert(string, bool, bool, IReadOnlyList<knetid>)",
+                    optionalMissing);
+                _serverCheckLayerFinish = Optional(
+                    InteropReflection.FindMethod(serverMainType, "CheckIfEnoughPeopleAreAtLayerFinish"),
+                    "Together.ServerMain.CheckIfEnoughPeopleAreAtLayerFinish()",
                     optionalMissing);
             }
 
@@ -898,6 +828,18 @@ namespace CasualtiesUnknown.SaveManager.Interop
                 _worldLoadVanillaGeneratedWorld = Optional(InteropReflection.FindMethod(worldMpType, "LoadVanillaGeneratedWorld", typeof(bool)), "Together.WorldMP.LoadVanillaGeneratedWorld(bool)", optionalMissing);
             }
 
+            Type savesystemPatchType = InteropReflection.FindType(_assembly, "Together.SavesystemPatch");
+            if (savesystemPatchType == null)
+            {
+                optionalMissing.Add("Together.SavesystemPatch");
+            }
+            else
+            {
+                MemberInfo pendingMember = (MemberInfo)InteropReflection.FindField(savesystemPatchType, "PendingLoadMpSave")
+                    ?? InteropReflection.FindProperty(savesystemPatchType, "PendingLoadMpSave");
+                _savesystemPendingLoadMpSave = Optional(pendingMember, "Together.SavesystemPatch.PendingLoadMpSave", optionalMissing);
+            }
+
             _knetidId = Require(InteropReflection.FindField(_knetidType, "id"), "Together.knetid.id", missing);
             _knetidCtor = Require(InteropReflection.FindConstructor(_knetidType, typeof(ushort)), "Together.knetid(ushort)", missing);
 
@@ -905,7 +847,6 @@ namespace CasualtiesUnknown.SaveManager.Interop
             {
                 _putInt = Require(InteropReflection.FindMethod(_writerType, "Put", typeof(int)), "写入器 Put(int)", missing);
                 _putUInt = Require(InteropReflection.FindMethod(_writerType, "Put", typeof(uint)), "写入器 Put(uint)", missing);
-                // 16 位原语可选：缺失时只降级该原语，不把提供方判为不可用。
                 _putUShort = InteropReflection.FindMethod(_writerType, "Put", typeof(ushort));
                 _putBool = Require(InteropReflection.FindMethod(_writerType, "Put", typeof(bool)), "写入器 Put(bool)", missing);
                 _putFloat = Require(InteropReflection.FindMethod(_writerType, "Put", typeof(float)), "写入器 Put(float)", missing);
@@ -917,7 +858,6 @@ namespace CasualtiesUnknown.SaveManager.Interop
             {
                 _getInt = Require(InteropReflection.FindMethod(readerType, "GetInt"), "读取器 GetInt()", missing);
                 _getUInt = Require(InteropReflection.FindMethod(readerType, "GetUInt"), "读取器 GetUInt()", missing);
-                // 16 位原语可选：缺失时只降级该原语，不把提供方判为不可用。
                 _getUShort = InteropReflection.FindMethod(readerType, "GetUShort");
                 _getBool = Require(InteropReflection.FindMethod(readerType, "GetBool"), "读取器 GetBool()", missing);
                 _getFloat = Require(InteropReflection.FindMethod(readerType, "GetFloat"), "读取器 GetFloat()", missing);
@@ -936,8 +876,8 @@ namespace CasualtiesUnknown.SaveManager.Interop
                     _pluginSuccessfullyInitialized, _pluginForceDisableMod,
                     _netBodyBody, _tryGetPlayerAndNetBody,
                     _scavLocalPlayer, _scavPlayerId, _scavSteamId, _scavClientIdToPlayerDict, _scavPlayerLeft, _scavGetPersistentId,
-                    _scavPlayerName, _scavBodyToPlayerDict, _scavAllLivingPlayers, _scavPlayerJoined, _scavTeleportCharacter,
-                    _serverAllClientIds, _serverAnnounceAlert, _multiplayerStatusLog, _worldLoadVanillaGeneratedWorld,
+                    _scavPlayerName, _scavSelectedCharacter, _scavBodyToPlayerDict, _scavAllLivingPlayers, _scavAllDeadPlayers, _scavPlayerJoined, _scavTeleportCharacter,
+                    _serverAllClientIds, _serverAllClientIdsExceptHost, _serverAnnounceAlert, _serverCheckLayerFinish, _multiplayerStatusLog, _worldLoadVanillaGeneratedWorld, _savesystemPendingLoadMpSave,
                     _knetidId, _knetidCtor,
                     _putInt, _putUInt, _putUShort, _putBool, _putFloat, _putString, _putBytes,
                     _getInt, _getUInt, _getUShort, _getBool, _getFloat, _getString, _getBytes, _readerAvailableBytes)
@@ -946,22 +886,17 @@ namespace CasualtiesUnknown.SaveManager.Interop
             return missing.Count == 0;
         }
 
-        /// <summary>Debug 构建下统计已解析成员数；Release 中调用点被整体移除，不会分配数组。</summary>
         private static int CountResolved(params object[] members)
         {
             int resolved = 0;
             for (int i = 0; i < members.Length; i++)
             {
-                if (members[i] != null)
-                {
-                    resolved++;
-                }
+                if (members[i] != null) resolved++;
             }
 
             return resolved;
         }
 
-        /// <summary>在已加载程序集里按简单名查找目标程序集；不加载新程序集。</summary>
         private static Assembly FindTargetAssembly()
         {
             Assembly[] assemblies = AppDomain.CurrentDomain.GetAssemblies();
@@ -976,57 +911,33 @@ namespace CasualtiesUnknown.SaveManager.Interop
             return null;
         }
 
-        /// <summary>从 RegisterCustomServerReceiver 的第 2 个形参取出读取器类型。</summary>
         private static Type ReceiverReaderType(MethodInfo register)
         {
-            if (register == null)
-            {
-                return null;
-            }
-
+            if (register == null) return null;
             ParameterInfo[] parameters = register.GetParameters();
-            if (parameters.Length != 2 || !parameters[1].ParameterType.IsGenericType)
-            {
-                return null;
-            }
-
+            if (parameters.Length != 2 || !parameters[1].ParameterType.IsGenericType) return null;
             Type[] arguments = parameters[1].ParameterType.GetGenericArguments();
             return arguments.Length == 2 ? arguments[1] : null;
         }
 
-        /// <summary>记录缺失成员并把成员原样返回。</summary>
         private static T Require<T>(T member, string name, List<string> missing) where T : class
         {
-            if (member == null)
-            {
-                missing.Add(name);
-            }
-
+            if (member == null) missing.Add(name);
             return member;
         }
 
-        /// <summary>记录可选成员缺失并把成员原样返回；缺失不影响提供方可用性。</summary>
         private static T Optional<T>(T member, string name, List<string> missing) where T : class
         {
-            if (member == null)
-            {
-                missing.Add(name);
-            }
-
+            if (member == null) missing.Add(name);
             return member;
         }
 
         private static bool ReadBool(MemberInfo member)
         {
-            object value = InteropReflection.ReadMember(member, null);
-            return value is bool flag && flag;
+            return InteropReflection.ReadMember(member, null) is bool flag && flag;
         }
 
-        /// <summary>把成员解析结果格式化为 ok / missing。</summary>
-        private static string State(object member)
-        {
-            return member == null ? "missing" : "ok";
-        }
+        private static string State(object member) => member == null ? "missing" : "ok";
 
         private IDictionary ReadClientIdToPlayerDict()
         {
@@ -1037,16 +948,10 @@ namespace CasualtiesUnknown.SaveManager.Interop
         {
             player = null;
             IDictionary dictionary = ReadClientIdToPlayerDict();
-            if (dictionary == null)
-            {
-                return false;
-            }
+            if (dictionary == null) return false;
 
             object key = MakeKnetid(clientId);
-            if (key == null || !dictionary.Contains(key))
-            {
-                return false;
-            }
+            if (key == null || !dictionary.Contains(key)) return false;
 
             player = dictionary[key];
             return player != null;
@@ -1060,8 +965,7 @@ namespace CasualtiesUnknown.SaveManager.Interop
 
         private ushort ReadClientId(object knetid)
         {
-            object id = InteropReflection.ReadMember(_knetidId, knetid);
-            return id is ushort value ? value : (ushort)0;
+            return InteropReflection.ReadMember(_knetidId, knetid) is ushort value ? value : (ushort)0;
         }
 
         private bool IsLocalPlayer(object player)
@@ -1070,7 +974,6 @@ namespace CasualtiesUnknown.SaveManager.Interop
             return local != null && ReferenceEquals(local, player);
         }
 
-        /// <remarks>玩家或其 playerId 读取失败时返回 <see cref="InteropPlayerRef.None"/>，不产出 clientId=0 的幽灵引用。</remarks>
         private InteropPlayerRef ToRef(object player, bool isLocal)
         {
             if (player == null || !InteropReflection.TryReadMember(_scavPlayerId, player, out object playerId) || playerId == null)
@@ -1081,7 +984,6 @@ namespace CasualtiesUnknown.SaveManager.Interop
             return ToRef(player, ReadClientId(playerId), isLocal);
         }
 
-        /// <remarks>名称取自 Together.ScavPlayer.playerName；该字段缺失或为空时传 null。</remarks>
         private InteropPlayerRef ToRef(object player, ushort clientId, bool isLocal)
         {
             object steamId = InteropReflection.ReadMember(_scavSteamId, player);
@@ -1091,49 +993,30 @@ namespace CasualtiesUnknown.SaveManager.Interop
 
         private object ReadWriter(IInteropWriter writer)
         {
-            if (writer == null)
-            {
-                return null;
-            }
-
-            object native = writer.NativeHandle;
+            object native = writer?.NativeHandle;
             return native != null && _writerType != null && _writerType.IsInstanceOfType(native) ? native : null;
         }
 
         private Array BuildClientIdArray()
         {
             IDictionary dictionary = ReadClientIdToPlayerDict();
-            if (dictionary == null || dictionary.Count == 0)
-            {
-                return null;
-            }
+            if (dictionary == null || dictionary.Count == 0) return null;
 
             Array ids = Array.CreateInstance(_knetidType, dictionary.Count);
             int index = 0;
             foreach (object key in dictionary.Keys)
             {
-                ids.SetValue(key, index);
-                index++;
+                ids.SetValue(key, index++);
             }
 
             return ids;
         }
 
-        /// <summary>把写入器交给目标接收器登记方法；委托类型取自目标方法的形参。</summary>
         private static Delegate BindCallback(MethodInfo register, object receiver, MethodInfo callback)
         {
-            if (register == null || callback == null)
-            {
-                return null;
-            }
-
+            if (register == null || callback == null) return null;
             ParameterInfo[] parameters = register.GetParameters();
-            if (parameters.Length != 2)
-            {
-                return null;
-            }
-
-            return InteropReflection.BindDelegate(parameters[1].ParameterType, receiver, callback);
+            return parameters.Length == 2 ? InteropReflection.BindDelegate(parameters[1].ParameterType, receiver, callback) : null;
         }
 
         private bool RegisterServerReceiver(string channel, Action<InteropPlayerRef, IInteropReader> handler)
@@ -1152,28 +1035,22 @@ namespace CasualtiesUnknown.SaveManager.Interop
 
         private bool InvokeRegister(MethodInfo register, string channel, Delegate callback)
         {
-            if (callback == null)
-            {
-                return false;
-            }
-
-            if (!InteropReflection.TryInvoke(register, null, new object[] { channel, callback }, out object ignored))
+            if (callback == null) return false;
+            if (!InteropReflection.TryInvoke(register, null, new object[] { channel, callback }, out _))
             {
                 InteropDiagnostics.WarnOnce("TogetherProvider.Register." + channel, "通道接收器登记失败：" + channel);
                 return false;
             }
 
-            _callbacks.Add(callback);
+            lock (_sync) { _callbacks.Add(callback); }
             return true;
         }
 
         private void Put(object writer, MethodInfo method, object value)
         {
-            InteropReflection.TryInvoke(method, writer, new object[] { value }, out object ignored);
+            InteropReflection.TryInvoke(method, writer, new object[] { value }, out _);
         }
 
-        /// <summary>写入 16 位无符号整数；目标写入器缺少该原语时降级为 32 位无符号写入。</summary>
-        /// <remarks>降级只影响该原语：会话、名册与通道能力保持可用，降级在解析阶段警告一次。</remarks>
         private void PutUShort(object writer, ushort value)
         {
             if (_putUShort != null)
@@ -1185,21 +1062,15 @@ namespace CasualtiesUnknown.SaveManager.Interop
             Put(writer, _putUInt, (uint)value);
         }
 
-        /// <remarks>写入器 Put(string, int) 重载的第 2 个形参传 0，表示不限长度。</remarks>
         private void PutString(object writer, string value)
         {
-            InteropReflection.TryInvoke(_putString, writer, new object[] { value, 0 }, out object ignored);
+            InteropReflection.TryInvoke(_putString, writer, new object[] { value, 0 }, out _);
         }
 
-        /// <remarks>写入器 PutBytesWithLength(byte[]) 的长度前缀是 2 字节，超过 65535 字节的负载不写入。</remarks>
         private void PutBytes(object writer, byte[] value)
         {
-            if (value == null || value.Length > ushort.MaxValue)
-            {
-                return;
-            }
-
-            InteropReflection.TryInvoke(_putBytes, writer, new object[] { value }, out object ignored);
+            byte[] safe = value == null || value.Length > ushort.MaxValue ? Array.Empty<byte>() : value;
+            InteropReflection.TryInvoke(_putBytes, writer, new object[] { safe }, out _);
         }
 
         private T Get<T>(object reader, MethodInfo method, T fallback)
@@ -1207,8 +1078,6 @@ namespace CasualtiesUnknown.SaveManager.Interop
             return InteropReflection.TryInvoke(method, reader, Array.Empty<object>(), out object result) && result is T value ? value : fallback;
         }
 
-        /// <summary>读取 16 位无符号整数；目标读取器缺少该原语时返回 0，且不推进读取位置。</summary>
-        /// <remarks>降级只影响该原语：会话、名册与通道能力保持可用，降级在解析阶段警告一次。</remarks>
         private ushort GetUShort(object reader)
         {
             return _getUShort == null ? (ushort)0 : Get(reader, _getUShort, (ushort)0);
@@ -1216,12 +1085,9 @@ namespace CasualtiesUnknown.SaveManager.Interop
 
         private int ReadRemainingBytes(object reader)
         {
-            object value = InteropReflection.ReadMember(_readerAvailableBytes, reader);
-            return value is int count ? count : 0;
+            return InteropReflection.ReadMember(_readerAvailableBytes, reader) is int count ? count : 0;
         }
 
-        /// <summary>把目标程序集的写入器对象包成契约写入器，写操作转发给一次性解析好的 Put 重载。</summary>
-        /// <remarks>字节数组走 PutBytesWithLength(byte[])：先写 2 字节无符号长度，再写原始字节，与读取器 GetBytesWithLength() 对应。</remarks>
         private sealed class TogetherWriter : IInteropWriter
         {
             private readonly TogetherProvider _provider;
@@ -1243,7 +1109,6 @@ namespace CasualtiesUnknown.SaveManager.Interop
             void IInteropWriter.PutUInt(uint value) => _provider.Put(_native, _provider._putUInt, value);
 
             /// <inheritdoc/>
-            /// <remarks>目标写入器缺少 16 位原语时降级为 32 位无符号写入。</remarks>
             void IInteropWriter.PutUShort(ushort value) => _provider.PutUShort(_native, value);
 
             /// <inheritdoc/>
@@ -1266,8 +1131,6 @@ namespace CasualtiesUnknown.SaveManager.Interop
             }
         }
 
-        /// <summary>把目标程序集的读取器对象包成契约读取器，读操作转发给一次性解析好的 Get 重载。</summary>
-        /// <remarks>包装器不改变读取位置，读位置由底层读取器维护；底层读取失败时返回默认值。</remarks>
         private sealed class TogetherReader : IInteropReader
         {
             private readonly TogetherProvider _provider;
@@ -1292,7 +1155,6 @@ namespace CasualtiesUnknown.SaveManager.Interop
             uint IInteropReader.GetUInt() => _provider.Get(_native, _provider._getUInt, 0u);
 
             /// <inheritdoc/>
-            /// <remarks>目标读取器缺少 16 位原语时返回 0，且不推进读取位置。</remarks>
             ushort IInteropReader.GetUShort() => _provider.GetUShort(_native);
 
             /// <inheritdoc/>
@@ -1316,7 +1178,6 @@ namespace CasualtiesUnknown.SaveManager.Interop
             }
         }
 
-        /// <summary>把目标插件的 Action&lt;ScavPlayer, 读取器&gt; 转发到契约处理器。</summary>
         private sealed class ServerReceiver
         {
             private readonly TogetherProvider _provider;
@@ -1334,7 +1195,6 @@ namespace CasualtiesUnknown.SaveManager.Interop
             }
         }
 
-        /// <summary>把目标插件的 Action&lt;读取器&gt; 转发到契约处理器。</summary>
         private sealed class ClientReceiver
         {
             private readonly TogetherProvider _provider;
@@ -1352,7 +1212,6 @@ namespace CasualtiesUnknown.SaveManager.Interop
             }
         }
 
-        /// <summary>把 Action&lt;ScavPlayer&gt; 转发到契约处理器（玩家加入）。</summary>
         private sealed class PlayerJoinedReceiver
         {
             private readonly TogetherProvider _provider;
@@ -1370,7 +1229,6 @@ namespace CasualtiesUnknown.SaveManager.Interop
             }
         }
 
-        /// <summary>把 Action&lt;ScavPlayer&gt; 转发到契约处理器（玩家离开）。</summary>
         private sealed class PlayerLeftReceiver
         {
             private readonly TogetherProvider _provider;

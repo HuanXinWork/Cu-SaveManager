@@ -3,12 +3,7 @@ using UnityEngine;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// 游戏内（按 ESC 暂停时）的 IMGUI 浮动唤起按钮。
-    /// 主菜单按钮不走 IMGUI，已迁移到 <see cref="MenuButtonUiInjector"/>，
-    /// 通过 Harmony patch PreRunScript.Start 克隆原版按钮挂到 PreRunScript.transform 下，
-    /// 生命周期与可见性都跟随 PreRunScript 父节点，与联机模组的主菜单背景按钮同款做法。
-    /// </summary>
+    /// <summary>游戏内暂停菜单打开时在屏幕右下角绘制的快捷入口按钮。</summary>
     internal sealed class OverlayUI
     {
         private const float ButtonWidth = 320f;
@@ -26,10 +21,10 @@ namespace CasualtiesUnknown.SaveManager
         private static readonly FieldInfo BrightnessPanelField =
             typeof(PlayerCamera).GetField("brightnessPanel", BindingFlags.Public | BindingFlags.Instance);
 
-        /// <summary>仅在游戏内暂停菜单打开时显示；兼容旧版 brightnessPanel 与新版 PauseHandler.pauseContainer。</summary>
+        /// <summary>仅在游戏内暂停菜单可见、且原生设置页与本面板均未打开时返回 true。</summary>
         internal static bool ShouldShow()
         {
-            if (PlayerCamera.main == null) return false;
+            if (PlayerCamera.main == null || SettingsMenu.instance != null || UiBlocker.IsBlocking) return false;
 
             if (TryGetPauseMenuVisible(out bool visible)) return visible;
             if (BrightnessPanelField == null) return false;

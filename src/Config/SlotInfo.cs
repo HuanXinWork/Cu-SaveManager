@@ -2,10 +2,7 @@ using System.IO;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// UI 用的槽位视图模型：物理路径 + 主存档 FileInfo + sidecar 元数据。
-    /// Hash 字段懒加载。
-    /// </summary>
+    /// <summary>UI 槽位视图模型，封装主存档文件、伴生元数据及懒加载的 MD5 哈希。</summary>
     internal sealed class SlotInfo
     {
         internal FileInfo File { get; }

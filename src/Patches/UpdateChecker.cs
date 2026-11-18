@@ -7,10 +7,7 @@ using UnityEngine.SceneManagement;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// 启动时拉取 GitHub releases/latest 比对当前版本，发现新版在屏幕左上角红字提示并可点开 release 页。
-    /// 受 AcceptUpdateNotice 开关控制；关闭则不检测不提示。
-    /// </summary>
+    /// <summary>异步检查 GitHub 最新 Release 版本，存在更新且开关启用时在主菜单左上角绘制跳转提示。</summary>
     [DisallowMultipleComponent]
     public class UpdateChecker : MonoBehaviour
     {
@@ -19,6 +16,7 @@ namespace CasualtiesUnknown.SaveManager
         private const string ReleasesUrl = "https://github.com/HuanXinWork/Cu-SaveManager/releases";
         private const int UpdateNoticeSlot = 1;
         private const string MainMenuScene = "PreGen";
+        private const int RequestTimeoutSeconds = 10;
 
         internal static bool Enabled = true;
 
@@ -27,7 +25,21 @@ namespace CasualtiesUnknown.SaveManager
         private static string _latestTag = "";
         private static bool _updateAvailable;
 
+        private UnityWebRequest _activeRequest;
+        private GUIStyle _noticeStyle;
+        private readonly GUIContent _noticeContent = new GUIContent();
+
         private void Start()
+        {
+            TryStartCheck();
+        }
+
+        private void OnDestroy()
+        {
+            DisposeActiveRequest(abort: true);
+        }
+
+        private void TryStartCheck()
         {
             if (_checked || !Enabled) return;
             _checked = true;
@@ -46,10 +58,15 @@ namespace CasualtiesUnknown.SaveManager
 
         private IEnumerator CheckForUpdates()
         {
-            using (UnityWebRequest www = UnityWebRequest.Get(ApiUrl))
+            UnityWebRequest www = UnityWebRequest.Get(ApiUrl);
+            _activeRequest = www;
+            try
             {
+                www.timeout = RequestTimeoutSeconds;
                 www.SetRequestHeader("User-Agent", "Cu-SaveManager");
                 yield return www.SendWebRequest();
+
+                if (_activeRequest != www) yield break;
 
                 if (www.result != UnityWebRequest.Result.Success)
                 {
@@ -57,15 +74,11 @@ namespace CasualtiesUnknown.SaveManager
                     yield break;
                 }
 
-                string json = www.downloadHandler.text;
-                const string key = "\"tag_name\":\"";
-                int idx = json.IndexOf(key, StringComparison.Ordinal);
-                if (idx < 0) yield break;
-                int start = idx + key.Length;
-                int end = json.IndexOf('"', start);
-                if (end <= start) yield break;
-                _latestTag = json.Substring(start, end - start);
+                string json = www.downloadHandler?.text;
+                if (!TopJson.TryReadString(json, "tag_name", out string tag) || string.IsNullOrEmpty(tag))
+                    yield break;
 
+                _latestTag = tag;
                 if (IsNewer(_currentVersion, _latestTag))
                 {
                     _updateAvailable = true;
@@ -76,39 +89,74 @@ namespace CasualtiesUnknown.SaveManager
                     ModLog.Info($"Up to date. Current: {_currentVersion}, Latest: {_latestTag}");
                 }
             }
+            finally
+            {
+                if (_activeRequest == www)
+                    DisposeActiveRequest(abort: false);
+            }
+        }
+
+        private void DisposeActiveRequest(bool abort)
+        {
+            UnityWebRequest req = _activeRequest;
+            if (req == null) return;
+            _activeRequest = null;
+            if (abort)
+            {
+                try { req.Abort(); } catch { }
+            }
+            try { req.Dispose(); } catch { }
         }
 
         private static bool IsNewer(string current, string latest)
+            => TryParseNormalizedVersion(current, out Version vc)
+               && TryParseNormalizedVersion(latest, out Version vl)
+               && vl > vc;
+
+        private static bool TryParseNormalizedVersion(string raw, out Version normalized)
         {
-            if (string.IsNullOrEmpty(current) || string.IsNullOrEmpty(latest)) return false;
-            string cur = current.TrimStart('v', 'V').Trim();
-            string lat = latest.TrimStart('v', 'V').Trim();
-            return Version.TryParse(cur, out Version vc) && Version.TryParse(lat, out Version vl) && vl > vc;
+            normalized = null;
+            if (string.IsNullOrWhiteSpace(raw)) return false;
+
+            string s = raw.Trim().TrimStart('v', 'V').Trim();
+            int suffix = s.IndexOfAny(new[] { '-', '+' });
+            if (suffix >= 0)
+                s = s.Substring(0, suffix).Trim();
+
+            if (!Version.TryParse(s, out Version parsed)) return false;
+            int build = parsed.Build < 0 ? 0 : parsed.Build;
+            normalized = new Version(parsed.Major, parsed.Minor, build);
+            return true;
         }
 
         private void OnGUI()
         {
-            if (!_updateAvailable || !Enabled) return;
-            // 仅在主菜单（PreGen 场景）提示，进游戏后（SampleScene）不弹。
+            if (!Enabled) return;
+            if (!_checked) TryStartCheck();
+            if (!_updateAvailable) return;
             if (SceneManager.GetActiveScene().name != MainMenuScene) return;
 
-            var style = new GUIStyle(GUI.skin.label)
+            if (_noticeStyle == null)
             {
-                fontSize = 26,
-                fontStyle = FontStyle.Bold,
-                alignment = TextAnchor.UpperLeft,
-                richText = false,
-                normal = { textColor = new Color(1f, 0.3f, 0.3f) },
-                hover = { textColor = new Color(1f, 0.55f, 0.55f) },
-                active = { textColor = new Color(1f, 0.2f, 0.2f) },
-            };
+                _noticeStyle = new GUIStyle(GUI.skin.label)
+                {
+                    fontSize = 26,
+                    fontStyle = FontStyle.Bold,
+                    alignment = TextAnchor.UpperLeft,
+                    richText = false,
+                    normal = { textColor = new Color(1f, 0.3f, 0.3f) },
+                    hover = { textColor = new Color(1f, 0.55f, 0.55f) },
+                    active = { textColor = new Color(1f, 0.2f, 0.2f) },
+                };
+            }
 
             string text = I18n.F("update.available", _latestTag);
             float x = 32f;
             float y = Screen.height * 0.12f + UpdateNoticeSlot * 40f;
-            Vector2 size = style.CalcSize(new GUIContent(text));
+            _noticeContent.text = text;
+            Vector2 size = _noticeStyle.CalcSize(_noticeContent);
             var rect = new Rect(x, y, size.x + 8f, size.y + 4f);
-            if (GUI.Button(rect, text, style))
+            if (GUI.Button(rect, _noticeContent, _noticeStyle))
                 Application.OpenURL(ReleasesUrl);
         }
     }

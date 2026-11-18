@@ -1,22 +1,21 @@
 using System;
+using System.Reflection;
 using HarmonyLib;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// 调 SaveSystem.SaveGame() 的保护壳。需要 PlayerCamera.main / body / WorldGeneration.world 三者齐全，
-    /// 主菜单或加载场景下直接调会 NRE，故先做存在性检查。
-    /// </summary>
+    /// <summary>封装单机 SaveSystem.SaveGame 调用与世界进层过渡态判据。</summary>
     internal static class GameSaveBridge
     {
-        /// <returns>true 表示真的调了游戏 SaveGame，false 表示被检查拦下了。</returns>
+        private static readonly FieldInfo DoingRegenField = AccessTools.Field(typeof(WorldGeneration), "doingRegen");
+
+        /// <summary>在玩家相机、身体与世界实例齐全时调用 SaveSystem.SaveGame，成功返回 true。</summary>
         internal static bool TrySaveGame()
         {
             try
             {
-                if (PlayerCamera.main == null) return false;
-                if (PlayerCamera.main.body == null) return false;
-                if (WorldGeneration.world == null) return false;
+                if (PlayerCamera.main == null || PlayerCamera.main.body == null || WorldGeneration.world == null)
+                    return false;
                 SaveSystem.SaveGame();
                 return true;
             }
@@ -27,16 +26,15 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        /// <summary>世界正在进下一层（RegenerateWorld）：此时 biomeDepth 已递增，不能作为当前层快照依据。</summary>
+        /// <summary>世界是否正处于生成、未就绪或进下一层（doingRegen）过渡中。</summary>
         internal static bool IsWorldRegenerating()
         {
             try
             {
                 var world = WorldGeneration.world;
                 if (world == null) return false;
-                if (world.generatingWorld) return true;
-                var f = AccessTools.Field(typeof(WorldGeneration), "doingRegen");
-                if (f != null && f.GetValue(world) is bool doing && doing) return true;
+                if (world.generatingWorld || !world.worldExists) return true;
+                if (DoingRegenField != null && DoingRegenField.GetValue(world) is bool doing && doing) return true;
             }
             catch { }
             return false;

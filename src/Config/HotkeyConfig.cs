@@ -1,12 +1,9 @@
-using BepInEx;
 using BepInEx.Configuration;
 using UnityEngine;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// 集中维护持久化配置项。所有按键默认 KeyCode.None，未绑定时不响应。
-    /// </summary>
+    /// <summary>集中维护 BepInEx 持久化配置项与快捷键绑定状态。</summary>
     internal sealed class HotkeyConfig
     {
         private static readonly KeyboardShortcut Unbound = new KeyboardShortcut(KeyCode.None);
@@ -20,75 +17,86 @@ namespace CasualtiesUnknown.SaveManager
         internal ConfigEntry<int> AutoBackupKeep { get; }
         internal ConfigEntry<bool> BackupBeforeOverwrite { get; }
 
-        // —— 死亡回档 —— //
         internal ConfigEntry<bool> AutoRollbackOnDeath { get; }
         internal ConfigEntry<float> RollbackDelaySeconds { get; }
         internal ConfigEntry<int> MultiplayerDeathThreshold { get; }
         internal ConfigEntry<int> RecentSlotsLimit { get; }
 
-        // —— 固定世界 —— //
         internal ConfigEntry<string> PreferredEngine { get; }
         internal ConfigEntry<string> SeedInput { get; }
         internal ConfigEntry<string> PositionMode { get; }
         internal ConfigEntry<float> FixedX { get; }
         internal ConfigEntry<float> FixedY { get; }
 
-        // —— 杂项 —— //
         internal ConfigEntry<bool> ShowLogInConsole { get; }
         internal ConfigEntry<bool> AcceptUpdateNotice { get; }
         internal ConfigEntry<bool> SuppressStartingSuppliesOnLoad { get; }
         internal ConfigEntry<bool> SuppressIntroLifepodOnLoad { get; }
         internal ConfigEntry<string> PreferredLanguage { get; }
+        internal ConfigEntry<int> SchemaVersion { get; }
 
         internal HotkeyConfig(ConfigFile config)
         {
             ToggleSettingsHotkey = config.Bind("Hotkeys", "ToggleSettingsHotkey", Unbound,
-                "打开主面板并切到设置 tab。默认未绑定。");
+                "打开主面板并切到设置页。默认未绑定。");
             ToggleSlotsHotkey = config.Bind("Hotkeys", "ToggleSlotsHotkey", Unbound,
-                "打开 / 关闭主面板（默认在存档 tab）。默认未绑定。");
+                "打开或关闭主面板。默认未绑定。");
             QuickSaveHotkey = config.Bind("Hotkeys", "QuickSaveHotkey", Unbound,
                 "立即保存当前进度到新槽位。默认未绑定。");
 
             AutoBackupEnabled = config.Bind("AutoBackup", "Enabled", false,
-                "是否启用定时备份。开启后每隔 IntervalMinutes 复制当前 save.sv 到自动槽。");
+                "是否启用定时备份。开启后每隔 IntervalMinutes 复制当前存档到自动槽。");
             AutoBackupIntervalMinutes = config.Bind("AutoBackup", "IntervalMinutes", 5.0f,
                 new ConfigDescription("定时备份间隔（分钟）", new AcceptableValueRange<float>(0.5f, 240.0f)));
             AutoBackupKeep = config.Bind("AutoBackup", "Keep", 10,
-                new ConfigDescription("自动槽最多保留多少份（不含 pinned 槽）", new AcceptableValueRange<int>(1, 100)));
+                new ConfigDescription("自动槽最多保留份数（不含已标记槽位）", new AcceptableValueRange<int>(1, 100)));
             BackupBeforeOverwrite = config.Bind("Safety", "BackupBeforeOverwrite", true,
-                "在切回某槽位前，先把当前 save.sv 复制到一个新槽（昵称\"切回前自动备份\"）。");
+                "切回槽位前先把当前存档备份到新槽位。");
 
             AutoRollbackOnDeath = config.Bind("Rollback", "AutoOnDeath", false,
-                "角色死亡时（黑屏 100% 且 body 已死）自动倒计时回档到最新备份。");
+                "角色死亡（单机进入死亡结算或多人死亡人数达到阈值）时自动倒计时回档到当前局最新备份。");
             RollbackDelaySeconds = config.Bind("Rollback", "DelaySeconds", 3.0f,
-                new ConfigDescription("倒计时秒数，结束后执行回档。期间可在回档 tab 取消。",
+                new ConfigDescription("倒计时秒数，结束后执行回档，期间可取消。",
                     new AcceptableValueRange<float>(1.0f, 10.0f)));
-            MultiplayerDeathThreshold = config.Bind("Rollback", "MultiplayerDeathThreshold", 1,
-                new ConfigDescription("多人模式触发自动回档需要的死亡人数（包含本地玩家）。",
-                    new AcceptableValueRange<int>(1, 16)));
+            MultiplayerDeathThreshold = config.Bind("Rollback", "MultiplayerDeathThreshold", 0,
+                new ConfigDescription("多人模式触发自动回档所需的死亡人数：0=全员死亡（团灭）才触发；1..16=达到指定死亡人数即触发。",
+                    new AcceptableValueRange<int>(0, 16)));
             RecentSlotsLimit = config.Bind("Rollback", "RecentSlotsLimit", 20,
-                new ConfigDescription("回档 tab 默认显示的最近槽位条数（不含日期筛选）。",
+                new ConfigDescription("回档页默认显示的最近槽位条数。",
                     new AcceptableValueRange<int>(5, 100)));
 
             PreferredEngine = config.Bind("World", "PreferredEngine", "qol",
-                "固定世界生成引擎：qol=QoL；krok=Together（需联机 mod 启用）；self=本 mod。不在场时回落 self。");
+                "固定世界生成引擎：qol=QoL；krok=Together（联机模组）；self=本模组。所选引擎不可用时，联机模组在场回落 krok，否则回落 self。");
             SeedInput = config.Bind("World", "SeedInput", "",
-                "自身引擎种子。留空时从存档字节自动派生（FNV-1a）；填数字或文本则按手动种子。仅 self 引擎生效。");
+                "本模组引擎种子。留空时从存档字节自动派生（FNV-1a）；填写数字或文本则按手动种子，仅 self 引擎生效。");
             PositionMode = config.Bind("World", "PositionMode", "lastPos",
-                "读档/回档后的玩家位置模式：lastPos=回保存时坐标；fixedPos=回 FixedX/FixedY。");
+                "读档或回档后的玩家位置模式：lastPos=保存时坐标；fixedPos=FixedX/FixedY。");
             FixedX = config.Bind("World", "FixedX", 0f, "fixedPos 模式下的世界 X 坐标。");
             FixedY = config.Bind("World", "FixedY", 0f, "fixedPos 模式下的世界 Y 坐标。");
 
             ShowLogInConsole = config.Bind("Misc", "ShowInConsole", false,
-                "是否把模组日志同步打印到游戏内控制台（` 键打开）。关闭时仅写入 BepInEx 日志。");
+                "是否把模组日志同步输出到游戏内控制台。");
             AcceptUpdateNotice = config.Bind("Misc", "AcceptUpdateNotice", true,
-                "是否在启动时检查 GitHub 新版本并在游戏内提示。关闭则不检测不提示。");
+                "是否在启动时检查 GitHub 新版本并在游戏内提示。");
             SuppressStartingSuppliesOnLoad = config.Bind("Misc", "SuppressStartingSuppliesOnLoad", true,
-                "读档/回档时屏蔽起始物资重发。游戏 WorldPlacePlayer 在第 1 层无 loadedRun 守卫，回档时会按 startingsupplies 重发 emergencylight 或 lantern+dogfood+waterbottle+trashbag。关闭以保留游戏原版行为。");
+                "读档或回档时屏蔽第 1 层起始物资重发。");
             SuppressIntroLifepodOnLoad = config.Bind("Misc", "SuppressIntroLifepodOnLoad", true,
-                "读档/回档时屏蔽初始 Lifepod 救生舱重新生成。游戏 WorldPlacePlayer 在第 1 层会无条件 GenerateEntityAtPos(Lifepod) 入场仓，回档时会再生成一份。关闭以保留游戏原版行为。");
+                "读档或回档时屏蔽第 1 层入场救生舱重复生成。");
             PreferredLanguage = config.Bind("I18n", "PreferredLanguage", "auto",
-                "界面语言：auto=跟随游戏；zh=强制中文；en=强制英文。该值会写入配置文件并在重启后保留。");
+                "界面语言：auto=跟随游戏；zh=强制中文；en=强制英文。");
+            SchemaVersion = config.Bind("Internal", "SchemaVersion", 0,
+                "配置迁移版本号（内部维护，请勿手动修改）。");
+
+            // 将旧版默认持久化的 MultiplayerDeathThreshold=1 一次性迁移为 0（全员死亡），避免房主单人阵亡误将存活子机踢回主菜单。
+            if (SchemaVersion.Value < 1)
+            {
+                if (MultiplayerDeathThreshold.Value == 1)
+                {
+                    MultiplayerDeathThreshold.Value = 0;
+                }
+                SchemaVersion.Value = 1;
+                config.Save();
+            }
         }
 
         internal static bool IsBound(KeyboardShortcut sc) => sc.MainKey != KeyCode.None;
@@ -96,8 +104,7 @@ namespace CasualtiesUnknown.SaveManager
         internal static bool TriggeredThisFrame(ConfigEntry<KeyboardShortcut> entry)
         {
             var sc = entry.Value;
-            if (!IsBound(sc)) return false;
-            return sc.IsDown();
+            return IsBound(sc) && sc.IsDown();
         }
     }
 }

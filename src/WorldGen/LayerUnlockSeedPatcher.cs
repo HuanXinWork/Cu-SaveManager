@@ -8,32 +8,32 @@ using UnityEngine;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// 让 LayerUnlock 解锁层的协程生成内容随种子复现：对其协程状态机的 MoveNext 挂 prefix/postfix，
-    /// 给每个协程实例一条私有确定 RNG 流（首次进入按 种子+层深+协程盐 InitState，其后跨 yield 保存/还原），
-    /// 并在每步前后隔离/还原全局 Random.state。LayerUnlock 不在场或世界未确定化时不介入。
-    /// </summary>
-    /// <remarks>
-    /// 状态机类型与 MoveNext 一律取自 <see cref="InteropBootstrap.LayerUnlock"/>（<see cref="LayerUnlockProvider.MoveNextMethods"/>），
-    /// 本类不再维护状态机类型名，也不再自行探测程序集。
-    /// </remarks>
+    /// <summary>隔离 LayerUnlock 解锁层协程每步 MoveNext 的随机流，使其生成结构在确定化世界下可复现。</summary>
     internal static class LayerUnlockSeedPatcher
     {
         private static bool _patched;
 
-        // 每个协程实例的私有 RNG 状态。
+        internal static void ResetPatchState() => _patched = false;
+
         private sealed class CoState
         {
-            internal bool Active;   // 该实例是否启用确定化（首个 MoveNext 时一次性判定并锁定）
-            internal bool Seeded;   // 是否已用层种子 InitState
-            internal int Seed;      // 本协程确定种子
-            internal UnityEngine.Random.State Saved; // 本协程上次推进后的 RNG 状态
+            internal bool Active;
+            internal bool Seeded;
+            internal int Seed;
+            internal UnityEngine.Random.State Saved;
+        }
+
+        private struct StepScope
+        {
+            internal bool Active;
+            internal CoState Co;
+            internal UnityEngine.Random.State SavedGlobal;
         }
 
         private static readonly ConditionalWeakTable<object, CoState> _table =
             new ConditionalWeakTable<object, CoState>();
 
-        /// <summary>协程类型名 -> 盐（避免不同协程用同一序列；与 SeededWorldPatcher 的阶段偏移区间错开）。</summary>
+        /// <summary>按协程类型名映射独立盐值，与 SeededWorldPatcher 的阶段偏移区间错开。</summary>
         private static int SaltFor(Type declaringType)
         {
             string n = declaringType != null ? declaringType.Name : "";
@@ -46,37 +46,26 @@ namespace CasualtiesUnknown.SaveManager
 
         internal static void TryPatch()
         {
-            if (_patched)
-            {
-                return;
-            }
+            if (_patched) return;
 
             try
             {
                 LayerUnlockProvider provider = InteropBootstrap.LayerUnlock;
-                if (!provider.IsPresent)
-                {
-                    // LayerUnlock 不在场：不置 _patched，留待世界生成时重试。
-                    return;
-                }
+                if (!provider.IsPresent) return;
 
                 IReadOnlyList<MethodInfo> moveNextMethods = provider.MoveNextMethods;
-                if (moveNextMethods.Count == 0)
-                {
-                    // 提供方会自行记录缺失的状态机；没有可挂载目标时保持未挂载以便重试。
-                    return;
-                }
+                if (moveNextMethods.Count == 0) return;
 
                 Harmony harmony = new Harmony("com.casualtiesUnknown.saveManager.layerUnlockSeed");
                 Type self = typeof(LayerUnlockSeedPatcher);
                 HarmonyMethod prefix = new HarmonyMethod(self.GetMethod(nameof(MoveNext_Prefix),
                     BindingFlags.Static | BindingFlags.NonPublic));
-                HarmonyMethod postfix = new HarmonyMethod(self.GetMethod(nameof(MoveNext_Postfix),
+                HarmonyMethod finalizer = new HarmonyMethod(self.GetMethod(nameof(MoveNext_Finalizer),
                     BindingFlags.Static | BindingFlags.NonPublic));
 
                 for (int i = 0; i < moveNextMethods.Count; i++)
                 {
-                    harmony.Patch(moveNextMethods[i], prefix, postfix);
+                    harmony.Patch(moveNextMethods[i], prefix: prefix, finalizer: finalizer);
                 }
 
                 _patched = true;
@@ -88,13 +77,19 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        private static void MoveNext_Prefix(object __instance, MethodBase __originalMethod,
-            out UnityEngine.Random.State __state)
+        private static void MoveNext_Prefix(object __instance, MethodBase __originalMethod, out StepScope __state)
         {
             __state = default;
             CoState co = _table.GetValue(__instance, _ => CreateState(__instance, __originalMethod));
             if (!co.Active) return;
-            __state = UnityEngine.Random.state; // 存游戏全局 RNG 流
+
+            __state = new StepScope
+            {
+                Active = true,
+                Co = co,
+                SavedGlobal = UnityEngine.Random.state,
+            };
+
             if (!co.Seeded)
             {
                 co.Seeded = true;
@@ -106,11 +101,14 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        private static void MoveNext_Postfix(object __instance, UnityEngine.Random.State __state)
+        private static Exception MoveNext_Finalizer(Exception __exception, StepScope __state)
         {
-            if (!_table.TryGetValue(__instance, out CoState co) || !co.Active) return;
-            co.Saved = UnityEngine.Random.state; // 存本协程推进后的 RNG 流
-            UnityEngine.Random.state = __state;  // 还原游戏全局 RNG 流，不污染别处
+            if (__state.Active)
+            {
+                __state.Co.Saved = UnityEngine.Random.state;
+                UnityEngine.Random.state = __state.SavedGlobal;
+            }
+            return __exception;
         }
 
         private static CoState CreateState(object instance, MethodBase originalMethod)
@@ -124,20 +122,22 @@ namespace CasualtiesUnknown.SaveManager
             return co;
         }
 
-        // 是否处于确定化世界：self 引擎激活，或 QoL 在场且已有非 0 种子。否则不介入。
         private static bool DeterminismActive()
         {
             try
             {
-                if (SeededWorldEngine.IsActive) return true;
-                if (QolBridge.IsQolPresent())
+                if (SeededWorldEngine.IsActive
+                    && (!MultiplayerBridge.IsMultiplayerRunning() || SeededWorldEngine.MpReseedEnabled))
                 {
-                    QolBridge.ReadCurrentSeed(out int s, out _);
-                    return s != 0;
+                    return true;
                 }
+
+                return InteropBootstrap.Qol.TryReadSeed(out bool seeded, out int s, out _) && seeded && s != 0;
             }
-            catch { }
-            return false;
+            catch
+            {
+                return false;
+            }
         }
 
         private static int ComposeSeed(WorldGeneration wg, int depth, int salt)
@@ -150,10 +150,17 @@ namespace CasualtiesUnknown.SaveManager
 
         private static int ResolveBaseSeed()
         {
-            if (SeededWorldEngine.IsActive && SeededWorldEngine.CurrentSeed != 0)
+            if (SeededWorldEngine.IsActive && SeededWorldEngine.CurrentSeed != 0
+                && (!MultiplayerBridge.IsMultiplayerRunning() || SeededWorldEngine.MpReseedEnabled))
+            {
                 return SeededWorldEngine.CurrentSeed;
-            QolBridge.ReadCurrentSeed(out int s, out _);
-            if (s != 0) return s;
+            }
+
+            if (InteropBootstrap.Qol.TryReadSeed(out bool seeded, out int s, out _) && seeded && s != 0)
+            {
+                return s;
+            }
+
             return SeededWorldEngine.CurrentSeed;
         }
 

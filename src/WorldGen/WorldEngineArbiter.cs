@@ -1,6 +1,6 @@
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>固定世界生成引擎：QoL / 联机模组 / 本 mod。</summary>
+    /// <summary>世界生成引擎类型。</summary>
     internal enum WorldEngine
     {
         Qol,
@@ -8,10 +8,7 @@ namespace CasualtiesUnknown.SaveManager
         Self,
     }
 
-    /// <summary>
-    /// 决定当前 run 用哪套固定世界引擎并落实。
-    /// PreferredEngine 配置值：qol | krok | self；按 mod 是否在场回落。
-    /// </summary>
+    /// <summary>按用户配置与在场模组裁决并切换世界生成引擎（qol / krok / self）。</summary>
     internal static class WorldEngineArbiter
     {
         internal static WorldEngine Current { get; private set; } = WorldEngine.Self;
@@ -42,13 +39,11 @@ namespace CasualtiesUnknown.SaveManager
             return name == "qol" || name == "krok" ? name : "self";
         }
 
-        /// <summary>按配置 + mod 在场情况解析实际引擎名。</summary>
         internal static string ResolveEffectiveEngineName(string preferred = null)
         {
             string pref = NormalizeEngineName(preferred ?? PreferredEngine);
             bool mpEnabled = MultiplayerBridge.IsMultiplayerEnabled();
             bool qol = QolBridge.IsQolPresent();
-            // 「本 mod 固定世界」是显式 opt-in：只有用户主动选 self 才启用确定化引擎。
             string result;
             if (pref == "self") result = "self";
             else if (pref == "krok" && mpEnabled) result = "krok";
@@ -66,7 +61,6 @@ namespace CasualtiesUnknown.SaveManager
             return WorldEngine.Self;
         }
 
-        /// <summary>新开局（非读档）按偏好启用引擎。</summary>
         internal static void ApplyForFreshRun()
         {
             var engine = ResolveEffectiveEngine();
@@ -91,8 +85,7 @@ namespace CasualtiesUnknown.SaveManager
             Current = WorldEngine.Qol;
         }
 
-        /// <summary>多人回档前按 sidecar 选定引擎准备：self/qol 引擎把 sidecar 记录的种子钉进 QoL，
-        /// 使世界按记录种子复现；krok 引擎联机时由主机广播状态，无需钉入。</summary>
+        /// <summary>多人回档前按 sidecar 激活对应引擎；self 引擎下保持 QoL 禁用，避免触发其联机广播与二次传送。</summary>
         internal static void PrepareMpRollback(SlotSidecar sidecar)
         {
             string engine = ResolveSidecarEngine(sidecar);
@@ -108,18 +101,15 @@ namespace CasualtiesUnknown.SaveManager
             }
             if (engine == "qol")
             {
-                // QoL 引擎：不激活 self，直接把 sidecar 种子钉回 QoL 让它用记录种子复现世界。
                 SeededWorldEngine.Deactivate();
                 Current = WorldEngine.Qol;
                 QolBridge.PrepareRollback(sidecar);
                 return;
             }
-            // self 引擎：Apply 内会先清零 QoL 种子，须在其后再 PrepareRollback 钉入，顺序不可调换。
             Apply(WorldEngine.Self, seed, input);
-            QolBridge.PrepareRollback(sidecar);
         }
 
-        /// <summary>Debug 构建下说明本次世界生成的种子来源与判定依据，避免世界不一致时反复猜引擎；Release 中调用点被整体移除。</summary>
+        /// <summary>返回当前世界生成种子来源的诊断描述。</summary>
         internal static string DescribeSeedSource()
         {
             if (Current == WorldEngine.Krok)
@@ -140,7 +130,6 @@ namespace CasualtiesUnknown.SaveManager
             return "QoL：" + QolBridge.DescribeSeedSource();
         }
 
-        /// <summary>self 引擎种子的判定依据：与配置手输种子一致 / 与当前 save.sv sidecar 一致 / 都不同。</summary>
         private static string DescribeSelfSeedBasis()
         {
             if (!string.IsNullOrEmpty(ManualSeedInput) && ManualSeedInput == SeededWorldEngine.InputString)
@@ -156,10 +145,7 @@ namespace CasualtiesUnknown.SaveManager
                     return "与当前 save.sv sidecar 记录的种子一致，来源于 sidecar";
                 }
             }
-            catch
-            {
-                // 读 sidecar 失败只影响这条诊断文案，不影响世界生成。
-            }
+            catch { }
 
             return "不等同手输种子也不同于当前 sidecar，按新开局随机种子/多人回放处理";
         }

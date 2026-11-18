@@ -5,20 +5,14 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 
 namespace CasualtiesUnknown.SaveManager.Interop
 {
-    /// <summary>RemiyamuremodLayerUnlock 的提供方适配器，全程通过反射访问目标程序集。</summary>
+    /// <summary>RemiyamuremodLayerUnlock 反射提供方，解析世界生成协程状态机的 MoveNext()。</summary>
     /// <remarks>
-    /// 目标程序集：程序集简单名含 "LayerUnlock"（忽略大小写）的插件程序集。
-    /// 依赖的目标类型：RemiyamuremodLayerUnlock.TerrainPatch、RemiyamuremodLayerUnlock.StructuresPatch、RemiyamuremodLayerUnlock.EntitiesPatch。
-    /// 依赖的目标成员：上述三个类型里 4 个协程的编译器生成状态机的 MoveNext()（bool MoveNext()），状态机全名如下：
-    /// RemiyamuremodLayerUnlock.TerrainPatch+&lt;GenerateStructuresAfterTerrain&gt;d__2、
-    /// RemiyamuremodLayerUnlock.StructuresPatch+&lt;AddStructuresForDepth&gt;d__1、
-    /// RemiyamuremodLayerUnlock.EntitiesPatch+&lt;SpawnIonHeaters&gt;d__3、
-    /// RemiyamuremodLayerUnlock.EntitiesPatch+&lt;SpawnSpaceHeaters&gt;d__4。
-    /// 状态机类型名里的编号由编译器生成，目标插件重新编译后可能变化；因此先在声明的类型上按名称找协程，再退回到全名解析。
-    /// 目标程序集尚未加载时不计为不可用缓存，下次访问重试。
+    /// 目标程序集含 "LayerUnlock"（RemiyamuremodLayerUnlock.TerrainPatch / StructuresPatch / EntitiesPatch）。
+    /// 优先从声明方法的 <see cref="IteratorStateMachineAttribute"/> 或嵌套类型前缀解析状态机，未命中再回退已知全名。
     /// </remarks>
     internal sealed class LayerUnlockProvider : IInteropProvider, IInteropTypeRegistry
     {
@@ -28,19 +22,34 @@ namespace CasualtiesUnknown.SaveManager.Interop
         private const string StructuresPatchTypeName = "RemiyamuremodLayerUnlock.StructuresPatch";
         private const string EntitiesPatchTypeName = "RemiyamuremodLayerUnlock.EntitiesPatch";
 
-        /// <summary>协程名与承载它的声明类型全名，按顺序对应 4 个需要确定化的协程。</summary>
-        private static readonly string[,] CoroutineTypeNames =
+        private const BindingFlags AllDeclared =
+            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly;
+
+        private readonly struct CoroutineTarget
         {
-            { "GenerateStructuresAfterTerrain", "RemiyamuremodLayerUnlock.TerrainPatch+<GenerateStructuresAfterTerrain>d__2" },
-            { "AddStructuresForDepth", "RemiyamuremodLayerUnlock.StructuresPatch+<AddStructuresForDepth>d__1" },
-            { "SpawnIonHeaters", "RemiyamuremodLayerUnlock.EntitiesPatch+<SpawnIonHeaters>d__3" },
-            { "SpawnSpaceHeaters", "RemiyamuremodLayerUnlock.EntitiesPatch+<SpawnSpaceHeaters>d__4" },
+            internal readonly int PatchSlot;
+            internal readonly string MethodName;
+            internal readonly string FallbackFullName;
+
+            internal CoroutineTarget(int patchSlot, string methodName, string fallbackFullName)
+            {
+                PatchSlot = patchSlot;
+                MethodName = methodName;
+                FallbackFullName = fallbackFullName;
+            }
+        }
+
+        private static readonly CoroutineTarget[] Targets =
+        {
+            new CoroutineTarget(0, "GenerateStructuresAfterTerrain", "RemiyamuremodLayerUnlock.TerrainPatch+<GenerateStructuresAfterTerrain>d__2"),
+            new CoroutineTarget(1, "AddStructuresForDepth", "RemiyamuremodLayerUnlock.StructuresPatch+<AddStructuresForDepth>d__1"),
+            new CoroutineTarget(2, "SpawnIonHeaters", "RemiyamuremodLayerUnlock.EntitiesPatch+<SpawnIonHeaters>d__3"),
+            new CoroutineTarget(2, "SpawnSpaceHeaters", "RemiyamuremodLayerUnlock.EntitiesPatch+<SpawnSpaceHeaters>d__4"),
         };
 
         private readonly object _sync = new object();
 
-        // 标志在锁内写、锁外读（EnsureResolved 的双检锁），必须带 volatile：
-        // 锁外读取只做 acquire，否则看到 _resolved 为 true 时其余成员字段仍可能不可见。
+        // 双检锁标志：锁外读取需 acquire 语义以确保已解析成员字段可见。
         private volatile bool _resolved;
         private volatile bool _available;
 
@@ -49,6 +58,7 @@ namespace CasualtiesUnknown.SaveManager.Interop
         private Type _structuresPatchType;
         private Type _entitiesPatchType;
 
+        private MethodInfo[] _resolvedBySlot = new MethodInfo[Targets.Length];
         private Type[] _stateMachineTypes = Array.Empty<Type>();
         private MethodInfo[] _moveNextMethods = Array.Empty<MethodInfo>();
 
@@ -59,12 +69,12 @@ namespace CasualtiesUnknown.SaveManager.Interop
         bool IInteropProvider.IsAvailable => EnsureResolved();
 
         /// <inheritdoc/>
-        InteropCapability IInteropProvider.Capabilities => InteropCapability.TypeRegistry;
+        InteropCapability IInteropProvider.Capabilities => InteropCapability.None;
 
         /// <inheritdoc/>
         int IInteropProvider.Priority => 0;
 
-        /// <summary>目标插件是否在场。</summary>
+        /// <summary>目标插件是否在场且至少解析到一个目标协程状态机。</summary>
         internal bool IsPresent => EnsureResolved();
 
         /// <summary>目标插件程序集；尚未加载时为 null。</summary>
@@ -77,7 +87,7 @@ namespace CasualtiesUnknown.SaveManager.Interop
             }
         }
 
-        /// <summary>已解析到的协程状态机类型，缺失的协程不占位。</summary>
+        /// <summary>已解析到的协程状态机类型列表。</summary>
         internal IReadOnlyList<Type> StateMachineTypes
         {
             get
@@ -87,8 +97,7 @@ namespace CasualtiesUnknown.SaveManager.Interop
             }
         }
 
-        /// <summary>与 <see cref="StateMachineTypes"/> 一一对应的 MoveNext() 方法，缺失的协程不占位。</summary>
-        /// <remarks>挂 prefix / postfix 由调用方用自己的 Harmony 实例完成，本提供方只负责解析。</remarks>
+        /// <summary>与 <see cref="StateMachineTypes"/> 一一对应的 MoveNext() 方法列表。</summary>
         internal IReadOnlyList<MethodInfo> MoveNextMethods
         {
             get
@@ -98,49 +107,45 @@ namespace CasualtiesUnknown.SaveManager.Interop
             }
         }
 
-        /// <summary>按协程名取状态机的 MoveNext()；未解析到时返回 false。</summary>
+        /// <summary>按协程方法名获取已解析的状态机 MoveNext()。</summary>
         internal bool TryGetMoveNext(string coroutineName, out MethodInfo moveNext)
         {
             moveNext = null;
-            EnsureResolved();
-            for (int i = 0; i < CoroutineTypeNames.GetLength(0); i++)
+            if (string.IsNullOrEmpty(coroutineName))
             {
-                if (!string.Equals(CoroutineTypeNames[i, 0], coroutineName, StringComparison.Ordinal))
-                {
-                    continue;
-                }
+                return false;
+            }
 
-                Type stateMachine = InteropReflection.FindType(_assembly, CoroutineTypeNames[i, 1]);
-                if (stateMachine == null)
-                {
-                    return false;
-                }
+            EnsureResolved();
+            if (_assembly == null)
+            {
+                return false;
+            }
 
-                moveNext = InteropReflection.FindMethod(stateMachine, "MoveNext");
-                return moveNext != null;
+            for (int i = 0; i < Targets.Length; i++)
+            {
+                if (string.Equals(Targets[i].MethodName, coroutineName, StringComparison.Ordinal))
+                {
+                    moveNext = _resolvedBySlot[i];
+                    return moveNext != null;
+                }
             }
 
             return false;
         }
 
-        /// <summary>一行摘要，列出各依赖成员的解析结果，用于启动日志与版本变动时的排查。</summary>
+        /// <summary>返回依赖类型与协程状态机的解析状态摘要。</summary>
         internal string DescribeResolvedMembers()
         {
             EnsureResolved();
-            string[] names = new string[CoroutineTypeNames.GetLength(0)];
-            for (int i = 0; i < names.Length; i++)
-            {
-                names[i] = CoroutineTypeNames[i, 0] + ".MoveNext=" + State(ResolveMoveNext(CoroutineTypeNames[i, 1]));
-            }
-
             return "assembly=" + State(_assembly)
                 + " " + TerrainPatchTypeName + "=" + State(_terrainPatchType)
                 + " " + StructuresPatchTypeName + "=" + State(_structuresPatchType)
                 + " " + EntitiesPatchTypeName + "=" + State(_entitiesPatchType)
-                + " " + string.Join(" ", names);
+                + " " + DescribeCoroutines();
         }
 
-        /// <remarks>只查目标程序集，不扫描 AppDomain。</remarks>
+        /// <inheritdoc/>
         bool IInteropTypeRegistry.TryResolveType(string fullName, out Type type)
         {
             return TryResolveType(fullName, out type);
@@ -160,47 +165,120 @@ namespace CasualtiesUnknown.SaveManager.Interop
             return type != null;
         }
 
-        /// <summary>把成员解析结果格式化为 ok / missing。</summary>
-        private static string State(object member)
-        {
-            return member == null ? "missing" : "ok";
-        }
+        private static string State(object member) => member == null ? "missing" : "ok";
 
-        /// <summary>在已加载程序集里按简单名匹配目标程序集；不加载新程序集。</summary>
         private static Assembly FindTargetAssembly()
         {
+            Assembly self = typeof(LayerUnlockProvider).Assembly;
             Assembly[] assemblies = AppDomain.CurrentDomain.GetAssemblies();
             for (int i = 0; i < assemblies.Length; i++)
             {
-                string name = assemblies[i].GetName().Name;
+                Assembly candidate = assemblies[i];
+                if (candidate == null || ReferenceEquals(candidate, self))
+                {
+                    continue;
+                }
+
+                string name = candidate.GetName().Name;
                 if (!string.IsNullOrEmpty(name) && name.IndexOf(TargetAssemblyNamePart, StringComparison.OrdinalIgnoreCase) >= 0)
                 {
-                    return assemblies[i];
+                    return candidate;
                 }
             }
 
             return null;
         }
 
-        private MethodInfo ResolveMoveNext(string stateMachineFullName)
+        private Type GetDeclaringPatchType(int patchSlot)
         {
-            Type stateMachine = InteropReflection.FindType(_assembly, stateMachineFullName);
-            return stateMachine == null ? null : InteropReflection.FindMethod(stateMachine, "MoveNext");
+            switch (patchSlot)
+            {
+                case 0: return _terrainPatchType;
+                case 1: return _structuresPatchType;
+                default: return _entitiesPatchType;
+            }
         }
 
-        /// <summary>Debug 构建下把 4 个协程的 MoveNext 解析结果拼成一行；Release 中调用点被整体移除。</summary>
+        private static Type FindStateMachineOnDeclaringType(Type declaringType, string methodName)
+        {
+            if (declaringType == null || string.IsNullOrEmpty(methodName))
+            {
+                return null;
+            }
+
+            try
+            {
+                MethodInfo[] methods = declaringType.GetMethods(AllDeclared);
+                for (int i = 0; i < methods.Length; i++)
+                {
+                    if (methods[i].Name != methodName)
+                    {
+                        continue;
+                    }
+
+                    IteratorStateMachineAttribute attr = methods[i].GetCustomAttribute<IteratorStateMachineAttribute>(false);
+                    if (attr?.StateMachineType != null)
+                    {
+                        return attr.StateMachineType;
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                string prefix = "<" + methodName + ">d__";
+                Type[] nestedTypes = declaringType.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic);
+                for (int i = 0; i < nestedTypes.Length; i++)
+                {
+                    if (nestedTypes[i].Name.StartsWith(prefix, StringComparison.Ordinal))
+                    {
+                        return nestedTypes[i];
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return null;
+        }
+
+        private static MethodInfo ResolveCoroutineMoveNext(
+            Assembly assembly,
+            Type declaringType,
+            CoroutineTarget target,
+            out Type stateMachineType)
+        {
+            stateMachineType = FindStateMachineOnDeclaringType(declaringType, target.MethodName)
+                ?? InteropReflection.FindType(assembly, target.FallbackFullName);
+            if (stateMachineType == null)
+            {
+                return null;
+            }
+
+            MethodInfo moveNext = InteropReflection.FindMethod(stateMachineType, "MoveNext");
+            if (moveNext == null)
+            {
+                stateMachineType = null;
+            }
+
+            return moveNext;
+        }
+
         private string DescribeCoroutines()
         {
-            string[] parts = new string[CoroutineTypeNames.GetLength(0)];
-            for (int i = 0; i < parts.Length; i++)
+            string[] parts = new string[Targets.Length];
+            for (int i = 0; i < Targets.Length; i++)
             {
-                parts[i] = CoroutineTypeNames[i, 0] + ".MoveNext=" + State(ResolveMoveNext(CoroutineTypeNames[i, 1]));
+                parts[i] = Targets[i].MethodName + ".MoveNext=" + State(_resolvedBySlot[i]);
             }
 
             return string.Join(" ", parts);
         }
 
-        /// <summary>Debug 构建下统计已解析成员数；Release 中调用点被整体移除，不会分配数组。</summary>
         private static int CountResolved(params object[] members)
         {
             int resolved = 0;
@@ -215,7 +293,7 @@ namespace CasualtiesUnknown.SaveManager.Interop
             return resolved;
         }
 
-        /// <summary>首次访问时解析目标程序集与 4 个状态机，并在逻辑上标记已解析；目标程序集尚未加载时不置缓存，下次访问重试。</summary>
+        /// <summary>首次访问时解析目标程序集与协程状态机；程序集尚未加载时不缓存以便后续重试。</summary>
         private bool EnsureResolved()
         {
             if (_resolved)
@@ -240,25 +318,23 @@ namespace CasualtiesUnknown.SaveManager.Interop
                 _terrainPatchType = InteropReflection.FindType(assembly, TerrainPatchTypeName);
                 _structuresPatchType = InteropReflection.FindType(assembly, StructuresPatchTypeName);
                 _entitiesPatchType = InteropReflection.FindType(assembly, EntitiesPatchTypeName);
-                _available = _terrainPatchType != null || _structuresPatchType != null || _entitiesPatchType != null;
-                if (!_available)
-                {
-                    InteropDiagnostics.WarnOnce(
-                        "LayerUnlockProvider.Unavailable",
-                        "LayerUnlock 程序集未在场（" + TerrainPatchTypeName + "/" + StructuresPatchTypeName + "/" + EntitiesPatchTypeName + " 均未解析到），层解锁世界的种子确定化不生效");
-                }
 
-                List<Type> types = new List<Type>();
-                List<MethodInfo> methods = new List<MethodInfo>();
+                MethodInfo[] bySlot = new MethodInfo[Targets.Length];
+                List<Type> types = new List<Type>(Targets.Length);
+                List<MethodInfo> methods = new List<MethodInfo>(Targets.Length);
                 List<string> missing = new List<string>();
-                for (int i = 0; i < CoroutineTypeNames.GetLength(0); i++)
+                for (int i = 0; i < Targets.Length; i++)
                 {
-                    string stateMachineName = CoroutineTypeNames[i, 1];
-                    Type stateMachine = InteropReflection.FindType(assembly, stateMachineName);
-                    MethodInfo moveNext = stateMachine == null ? null : InteropReflection.FindMethod(stateMachine, "MoveNext");
+                    CoroutineTarget target = Targets[i];
+                    MethodInfo moveNext = ResolveCoroutineMoveNext(
+                        assembly,
+                        GetDeclaringPatchType(target.PatchSlot),
+                        target,
+                        out Type stateMachine);
+                    bySlot[i] = moveNext;
                     if (moveNext == null)
                     {
-                        missing.Add(stateMachineName);
+                        missing.Add(target.MethodName);
                         continue;
                     }
 
@@ -266,15 +342,24 @@ namespace CasualtiesUnknown.SaveManager.Interop
                     methods.Add(moveNext);
                 }
 
+                _resolvedBySlot = bySlot;
                 _stateMachineTypes = types.ToArray();
                 _moveNextMethods = methods.ToArray();
-                if (missing.Count > 0)
+                _available = methods.Count > 0;
+
+                if (!_available)
                 {
-                    InteropDiagnostics.WarnOnce("LayerUnlockProvider", "协程状态机未解析到：" + string.Join(", ", missing));
+                    InteropDiagnostics.WarnOnce(
+                        "LayerUnlockProvider.Unavailable",
+                        "LayerUnlock 已加载但未解析到任何目标协程状态机，层解锁世界种子确定化不生效");
+                }
+                else if (missing.Count > 0)
+                {
+                    InteropDiagnostics.WarnOnce("LayerUnlockProvider", "部分协程状态机未解析到：" + string.Join(", ", missing));
                 }
 
                 ModLog.Debug("LayerUnlock：assembly='" + assembly.GetName().Name + "' available=" + _available
-                    + " capabilities=[" + (_available ? InteropDiagnostics.FormatCapabilities(InteropCapability.TypeRegistry) : "") + "]"
+                    + " capabilities=[]"
                     + " 已解析 " + (CountResolved(_terrainPatchType, _structuresPatchType, _entitiesPatchType) + methods.Count) + " 个成员"
                     + " " + TerrainPatchTypeName + "=" + State(_terrainPatchType)
                     + " " + StructuresPatchTypeName + "=" + State(_structuresPatchType)
@@ -282,7 +367,6 @@ namespace CasualtiesUnknown.SaveManager.Interop
                     + " " + DescribeCoroutines()
                     + " missing=[" + string.Join(", ", missing) + "]");
 
-                // 标志最后发布：锁外的读者看到 _resolved 为 true 时，此前写入的类型数组与方法数组均已可见。
                 _resolved = true;
             }
 

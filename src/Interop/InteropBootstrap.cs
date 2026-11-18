@@ -2,20 +2,15 @@
 // Copyright (c) 2026 huanxin886
 // SPDX-License-Identifier: MIT
 
+#if DEBUG
 using System.Collections.Generic;
+#endif
 
 namespace CasualtiesUnknown.SaveManager.Interop
 {
-    /// <summary>探测目标插件、登记提供方并输出一次自检摘要，重复调用幂等。</summary>
-    /// <remarks>
-    /// CuSaveManager 登记三个提供方：TogetherProvider（联机会话、名册、通道、事件、类型解析）、
-    /// QolProvider（跨程序集成员访问、类型解析、世界种子）、LayerUnlockProvider（LayerUnlock 协程状态机解析）。
-    /// 新增对接目标时在此追加提供方，并同步 <see cref="RequiredCapabilities"/>。
-    /// 业务侧优先消费契约接口；契约未覆盖的联机模组专有能力通过 <see cref="Together"/> 取用。
-    /// </remarks>
+    /// <summary>管理互操作登记表与目标模组提供方单例，首次初始化时输出一次自检摘要。</summary>
     internal static class InteropBootstrap
     {
-        /// <summary>本 mod 消费的能力位。</summary>
         private const InteropCapability RequiredCapabilities =
             InteropCapability.Session
             | InteropCapability.Roster
@@ -25,12 +20,12 @@ namespace CasualtiesUnknown.SaveManager.Interop
 
         private static readonly object Sync = new object();
 
-        private static IInteropRegistry _registry;
+        private static volatile IInteropRegistry _registry;
         private static TogetherProvider _together;
         private static QolProvider _qol;
         private static LayerUnlockProvider _layerUnlock;
 
-        /// <summary>首次调用时创建登记表、登记提供方并输出自检摘要；后续调用返回同一实例。</summary>
+        /// <summary>首次调用时创建登记表、注册提供方并输出自检摘要；后续调用返回同一实例。</summary>
         internal static IInteropRegistry Initialize()
         {
             if (_registry != null)
@@ -38,36 +33,40 @@ namespace CasualtiesUnknown.SaveManager.Interop
                 return _registry;
             }
 
+            IInteropRegistry created = null;
             lock (Sync)
             {
-                if (_registry != null)
+                if (_registry == null)
                 {
-                    return _registry;
+                    TogetherProvider together = new TogetherProvider();
+                    QolProvider qol = new QolProvider();
+                    LayerUnlockProvider layerUnlock = new LayerUnlockProvider();
+
+                    IInteropRegistry registry = new InteropRegistry();
+                    registry.Register(together);
+                    registry.Register(qol);
+                    registry.Register(layerUnlock);
+
+                    _together = together;
+                    _qol = qol;
+                    _layerUnlock = layerUnlock;
+                    _registry = registry;
+                    created = registry;
                 }
-
-                TogetherProvider together = new TogetherProvider();
-                QolProvider qol = new QolProvider();
-                LayerUnlockProvider layerUnlock = new LayerUnlockProvider();
-
-                IInteropRegistry registry = new InteropRegistry();
-                registry.Register(together);
-                registry.Register(qol);
-                registry.Register(layerUnlock);
-
-                _together = together;
-                _qol = qol;
-                _layerUnlock = layerUnlock;
-                _registry = registry;
-                InteropDiagnostics.Report(registry, RequiredCapabilities);
-#if DEBUG
-                LogProvidersForDebug(registry, RequiredCapabilities);
-#endif
-                return _registry;
             }
+
+            if (created != null)
+            {
+                InteropDiagnostics.Report(created, RequiredCapabilities);
+#if DEBUG
+                LogProvidersForDebug(created, RequiredCapabilities);
+#endif
+            }
+
+            return _registry;
         }
 
 #if DEBUG
-        /// <summary>Debug 构建下逐提供方输出可用性 / 能力集 / 未满足的必需能力；只随首次 Initialize 记录一次，不会逐帧刷屏。</summary>
         private static void LogProvidersForDebug(IInteropRegistry registry, InteropCapability required)
         {
             IReadOnlyList<IInteropProvider> providers = registry.Providers;
@@ -92,7 +91,7 @@ namespace CasualtiesUnknown.SaveManager.Interop
         /// <summary>已初始化的登记表；未初始化时返回空实现。</summary>
         internal static IInteropRegistry Current => _registry ?? NullInteropRegistry.Instance;
 
-        /// <summary>联机模组提供方；首次访问时完成登记表的初始化。</summary>
+        /// <summary>Casualties: Together 提供方。</summary>
         internal static TogetherProvider Together
         {
             get
@@ -102,7 +101,7 @@ namespace CasualtiesUnknown.SaveManager.Interop
             }
         }
 
-        /// <summary>QoL.Unknown 提供方；首次访问时完成登记表的初始化。</summary>
+        /// <summary>QoL.Unknown 提供方。</summary>
         internal static QolProvider Qol
         {
             get
@@ -112,7 +111,7 @@ namespace CasualtiesUnknown.SaveManager.Interop
             }
         }
 
-        /// <summary>LayerUnlock 提供方；首次访问时完成登记表的初始化。</summary>
+        /// <summary>LayerUnlock 提供方。</summary>
         internal static LayerUnlockProvider LayerUnlock
         {
             get

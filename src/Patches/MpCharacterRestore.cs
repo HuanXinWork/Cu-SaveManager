@@ -5,31 +5,24 @@ using HarmonyLib;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// 进世界前的角色兜底：在 Together.WorldMP.LoadVanillaGeneratedWorld(bool) 之前把存档里的角色写回
-    /// PreRunScript.characterSelected 与 Together.ScavPlayer.LocalPlayer.selectedCharacter。
-    /// </summary>
-    /// <remarks>
-    /// 需要独立兜底的原因：
-    ///   · 联机读档会经过 Together.CharacterSelectWait.SeedSavedCharacters()，但它依赖联机模组的内部静态状态，
-    ///     任何绕过该流程的调用（外部接管、回档、直接切场景）都会把角色留在默认值 0（Experiment）；
-    ///   · Together 的 PlayerCamera_Awake_CharacterSelect_MultiplayerPatch 会用 LocalPlayer.selectedCharacter
-    ///     覆盖 PreRunScript.characterSelected，只写后者会被盖回去。
-    /// 因此这里在最早的公共入口（世界加载前）一次性钉死两边，不依赖联机模组内部流程怎么变。
-    /// 只在 loadsave=true 且联机运行中生效；新开局不写，避免把上一局角色带进新局。
-    /// </remarks>
+    /// <summary>联机主机读档切入世界前，将本地存档角色同步写入 <c>PreRunScript.characterSelected</c> 与 <c>Together.ScavPlayer.LocalPlayer.selectedCharacter</c>。</summary>
     internal static class MpCharacterRestore
     {
-        private const string HarmonyId = "com.casualtiesUnknown.saveManager.mpCharacter";
+        private const string FallbackHarmonyId = "com.casualtiesUnknown.saveManager.mpCharacter";
 
-        private static bool _patched;
+        private static Harmony _fallbackHarmony;
 
-        /// <summary>挂载兜底 Prefix；联机模组尚未加载时留待下一次调用重试。</summary>
-        internal static void TryPatch()
+        internal static void ResetPatchState()
         {
-            if (_patched)
+            try { _fallbackHarmony?.UnpatchSelf(); } catch { }
+            _fallbackHarmony = null;
+        }
+
+        internal static void TryPatch(Harmony harmony = null)
+        {
+            if (harmony != null)
             {
-                return;
+                ApplyLayerModifiersRestorePatch.BindHarmony(harmony);
             }
 
             try
@@ -41,10 +34,21 @@ namespace CasualtiesUnknown.SaveManager
                     return;
                 }
 
-                Harmony harmony = new Harmony(HarmonyId);
-                harmony.Patch(load, prefix: new HarmonyMethod(
+                Harmony targetHarmony = harmony ?? (_fallbackHarmony ?? (_fallbackHarmony = new Harmony(FallbackHarmonyId)));
+                Patches info = Harmony.GetPatchInfo(load);
+                if (info?.Prefixes != null)
+                {
+                    foreach (Patch patch in info.Prefixes)
+                    {
+                        if (patch.owner == targetHarmony.Id && patch.PatchMethod?.Name == nameof(Prefix))
+                        {
+                            return;
+                        }
+                    }
+                }
+
+                targetHarmony.Patch(load, prefix: new HarmonyMethod(
                     typeof(MpCharacterRestore).GetMethod(nameof(Prefix), BindingFlags.Static | BindingFlags.NonPublic)));
-                _patched = true;
                 ModLog.Info("读档角色兜底已挂载（Together.WorldMP.LoadVanillaGeneratedWorld）");
             }
             catch (Exception ex)
@@ -59,22 +63,13 @@ namespace CasualtiesUnknown.SaveManager
             return worldMp == null ? null : InteropReflection.FindMethod(worldMp, "LoadVanillaGeneratedWorld", typeof(bool));
         }
 
-        /// <summary>世界加载前把存档角色钉回两边；取不到角色时保持原值，不阻塞读档。</summary>
-        /// <remarks>
-        /// 只在主机侧生效：客户端角色由服务器通过 CharacterSelectWait 广播后写入 LocalPlayer，
-        /// 客户端本地若又拿自己的 mp_save 覆盖，反而会与主机不一致。
-        /// 形参名故意用 __0：按位置注入不依赖目标参数名，联机模组重命名参数也不会让补丁失效。
-        /// </remarks>
         private static void Prefix(bool __0)
         {
-            bool loadsave = __0;
-            if (!loadsave || !MultiplayerBridge.IsMultiplayerRunning() || !MultiplayerBridge.IsServer())
+            if (!__0 || !MultiplayerBridge.IsMultiplayerRunning() || !MultiplayerBridge.IsServer())
             {
                 return;
             }
 
-            // 专用服务端没有本地角色，ResolveLocalPlayerSavePath 会随手拿到某个玩家子目录，
-            // 写 PreRunScript 也无意义，直接跳过。
             if (MultiplayerBridge.IsDedicatedServer())
             {
                 return;

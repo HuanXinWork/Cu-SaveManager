@@ -1,46 +1,48 @@
+using System.Collections.Generic;
+using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// Postfix patch <see cref="AdaptiveButton"/>.overlayActive getter：
-    /// <see cref="UiBlocker.IsBlocking"/> 为 true 时强制 __result = true，
-    /// 让主菜单 5 个 AdaptiveButton 跳过自身命中判定；
-    /// 鼠标命中 SaveManager 主菜单按钮矩形时也走相同分支。
-    /// </summary>
+    /// <summary>面板阻挡或光标位于注入的主菜单按钮上时，令 <c>AdaptiveButton.overlayActive</c> 返回 true 以抑制底层按钮悬停响应。</summary>
     [HarmonyPatch(typeof(AdaptiveButton), "overlayActive", MethodType.Getter)]
     internal static class AdaptiveButtonOverlayActiveGuard
     {
         private static void Postfix(ref bool __result)
         {
-            if (UiBlocker.IsBlocking) { __result = true; return; }
-            // 鼠标在 SaveManager 主菜单按钮矩形内时，让 AdaptiveButton 跳过自身命中判定
-            var rt = MenuButtonUiInjector.InjectedRect;
-            if (rt == null) return;
+            if (UiBlocker.IsBlocking || IsPointerOverInjectedButton())
+                __result = true;
+        }
+
+        internal static bool IsPointerOverInjectedButton()
+        {
+            RectTransform rt = MenuButtonUiInjector.InjectedRect;
+            if (rt == null) return false;
             try
             {
-                if (RectTransformUtility.RectangleContainsScreenPoint(rt, Input.mousePosition, null))
-                {
-                    __result = true;
-                }
+                Canvas canvas = rt.GetComponentInParent<Canvas>();
+                if (canvas != null) canvas = canvas.rootCanvas;
+                Camera cam = canvas == null || canvas.renderMode == RenderMode.ScreenSpaceOverlay
+                    ? null
+                    : canvas.worldCamera;
+                return RectTransformUtility.RectangleContainsScreenPoint(rt, Input.mousePosition, cam);
             }
-            catch { }
+            catch
+            {
+                return false;
+            }
         }
     }
 
-    /// <summary>
-    /// Prefix patch <see cref="AdaptiveButton"/>.Clicked()：
-    /// <see cref="UiBlocker.IsBlocking"/> 或鼠标命中 SaveManager 主菜单按钮矩形时 return false。
-    /// 用 TargetMethod 显式定位避免 HarmonyX 名称解析失败。
-    /// </summary>
+    /// <summary>面板阻挡或光标位于注入的主菜单按钮上时拦截 <c>AdaptiveButton.Clicked</c> 点击穿透。</summary>
     [HarmonyPatch]
     internal static class AdaptiveButtonClickedGuard
     {
         private static bool _logged;
         private static bool _patchLogged;
 
-        private static System.Reflection.MethodBase TargetMethod()
+        private static MethodBase TargetMethod()
         {
             var m = AccessTools.Method(typeof(AdaptiveButton), "Clicked");
             if (m != null && !_patchLogged)
@@ -54,29 +56,20 @@ namespace CasualtiesUnknown.SaveManager
         private static bool Prefix()
         {
             if (UiBlocker.IsBlocking) return false;
-            var rt = MenuButtonUiInjector.InjectedRect;
-            if (rt == null) return true;
-            try
+            if (AdaptiveButtonOverlayActiveGuard.IsPointerOverInjectedButton())
             {
-                if (RectTransformUtility.RectangleContainsScreenPoint(rt, Input.mousePosition, null))
+                if (!_logged)
                 {
-                    if (!_logged)
-                    {
-                        _logged = true;
-                        ModLog.Info("AdaptiveButtonClickedGuard 首次拦截穿透点击");
-                    }
-                    return false;
+                    _logged = true;
+                    ModLog.Info("AdaptiveButtonClickedGuard 首次拦截穿透点击");
                 }
+                return false;
             }
-            catch { }
             return true;
         }
     }
 
-    /// <summary>
-    /// Prefix patch <see cref="PlayerCamera"/>.HandleInput：
-    /// <see cref="UiBlocker.IsBlocking"/> 为 true 时 return false，吞掉游戏的 ESC / 移动 / 攻击等输入。
-    /// </summary>
+    /// <summary>面板阻挡期间拦截 <c>PlayerCamera.HandleInput</c> 角色操作与按键，仅保留视线跟随鼠标。</summary>
     [HarmonyPatch(typeof(PlayerCamera), "HandleInput")]
     internal static class PlayerCameraHandleInputGuard
     {
@@ -84,8 +77,6 @@ namespace CasualtiesUnknown.SaveManager
         private static bool Prefix()
         {
             if (!UiBlocker.IsBlocking) return true;
-            // UI 阻挡期间吞掉游戏的 ESC / 移动 / 攻击等输入，但仍让眼睛跟随鼠标
-            // （原版 HandleInput 每帧设置 targetLookPos，整体吞掉会导致视线卡死）。
             try
             {
                 if ((ConsoleScript.instance == null || !ConsoleScript.instance.active)
@@ -95,6 +86,34 @@ namespace CasualtiesUnknown.SaveManager
                 }
             }
             catch { }
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 面板阻挡期间拦截 <c>PlayerCamera.HandleMouseOver</c> 与 <c>HandleDragging</c>，
+    /// 清除已有拖拽引用，防止局内点击存档面板（或嵌入其中的 <c>SkinSync</c> 子页签）时误悬停或拖拽地面物品。
+    /// </summary>
+    [HarmonyPatch]
+    internal static class PlayerCameraMouseGuard
+    {
+        private static IEnumerable<MethodBase> TargetMethods()
+        {
+            MethodInfo mouseOver = AccessTools.Method(typeof(PlayerCamera), "HandleMouseOver");
+            if (mouseOver != null) yield return mouseOver;
+
+            MethodInfo dragging = AccessTools.Method(typeof(PlayerCamera), "HandleDragging");
+            if (dragging != null) yield return dragging;
+        }
+
+        [HarmonyPrefix]
+        private static bool Prefix(PlayerCamera __instance)
+        {
+            if (!UiBlocker.IsBlocking) return true;
+            if (__instance != null)
+            {
+                __instance.dragItem = null;
+            }
             return false;
         }
     }

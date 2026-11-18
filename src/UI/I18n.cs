@@ -1,13 +1,11 @@
+using System;
 using System.Collections.Generic;
+using System.Text;
 using UnityEngine;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// 极简 i18n：两套字典（zh-CN / EN），按 Locale.currentLangName 自动选择。
-    /// 游戏切换语言时会 LoadScene 重启，所以不需要订阅事件，每次 t() 都按当前值判定。
-    /// 找不到 key 返回 key 本身作为可见 fallback。
-    /// </summary>
+    /// <summary>中英双语本地化字典，支持跟随游戏语言或按配置强制指定。</summary>
     internal static class I18n
     {
         private static readonly string[] ChineseKeywords =
@@ -17,15 +15,12 @@ namespace CasualtiesUnknown.SaveManager
 
         private static readonly Dictionary<string, string> _zh = new Dictionary<string, string>
         {
-            // 通用
             ["app.name"] = "存档管理",
             ["app.menu_button"] = "存档管理",
-            // tab
             ["tab.settings"] = "设置",
             ["tab.slots"] = "存档",
             ["tab.rollback"] = "回档",
             ["tab.about"] = "关于",
-            // about
             ["about.title"] = "CuSaveManager",
             ["about.desc"] = "存档管理：自动备份 / 多槽位 / 死亡回档 / 立即保存，并提供侧栏聚合让其他 mod 嵌入设置面板。",
             ["about.version"] = "版本：{0}",
@@ -34,30 +29,25 @@ namespace CasualtiesUnknown.SaveManager
             ["about.link_release"] = "最新版本",
             ["about.sec_credits"] = "开发人员",
             ["about.sec_deps"] = "依赖与致谢",
-            // 状态条
             ["status.save_path"] = "save.sv 路径：{0}",
-            // 模式 / 诊断
             ["mode.singleplayer"] = "单机",
             ["mode.multiplayer"] = "多人会话",
             ["fmt.save_path_diag"] = "存档路径决策：模式={0}，选定={1}，mp_save 存在={2}，单机 save.sv 存在={3}",
-            // 设置：立即保存
             ["sec.save_now"] = "立即保存",
             ["lbl.alias_optional"] = "别名（可选）：",
             ["btn.save_now"] = "立即保存",
             ["btn.save_exit"] = "存档并退出",
-            // 设置：自动备份
             ["sec.auto_backup"] = "自动备份",
             ["sw.auto_backup_enabled"] = "启用定时备份",
             ["sw.backup_before_overwrite"] = "切回槽位前先备份当前 save.sv",
             ["fmt.interval_minutes"] = "间隔（分钟）：{0:0.#}",
             ["fmt.auto_keep_count"] = "每个冒险保留自动槽：{0}",
-            // 设置：死亡回档
             ["sec.auto_rollback"] = "死亡自动回档",
             ["sw.auto_rollback_enabled"] = "启用死亡自动回档",
             ["fmt.rollback_delay"] = "倒计时秒数：{0:0.#}",
             ["fmt.mp_death_threshold"] = "多人模式触发死亡人数：{0}",
+            ["lbl.mp_death_all"] = "多人模式触发条件：全员死亡（0）",
             ["fmt.recent_slots_limit"] = "回档 tab 显示最近条数：{0}",
-            // 设置：固定世界
             ["sec.world"] = "固定世界生成",
             ["lbl.world_engine"] = "生成引擎：",
             ["opt.engine_qol"] = "QoL（优先）",
@@ -74,7 +64,6 @@ namespace CasualtiesUnknown.SaveManager
             ["lbl.fixed_x"] = "固定 X：",
             ["lbl.fixed_y"] = "固定 Y：",
             ["msg.engine_qol_missing"] = "未检测到 QoL，将使用本 mod 引擎",
-            // 多人回档
             ["mp.only_host_can_rollback"] = "仅主机可执行多人回档",
             ["mp.rollback_returning_menu"] = "多人回档：正在让全员返回主菜单…",
             ["mp.rollback_reloading"] = "多人回档：主机正在重新加载存档…",
@@ -94,13 +83,11 @@ namespace CasualtiesUnknown.SaveManager
             ["mp.mod_not_detected"] = "未检测到多人 mod，按单机存档管理",
             ["qol.mod_detected"] = "已检测到 QoL，固定世界默认交给 QoL（可在面板切到本 mod 引擎）",
             ["qol.mod_not_detected"] = "未检测到 QoL，固定世界使用本 mod 引擎",
-            // 设置：快捷键
             ["sec.hotkeys"] = "快捷键",
             ["lbl.hotkey_toggle_panel"] = "打开 / 关闭本面板：",
             ["lbl.hotkey_quick_save"] = "立即保存：",
             ["lbl.hotkey_settings_tab"] = "跳转到设置 tab：",
             ["btn.unbound"] = "未绑定",
-            // 设置：杂项
             ["sec.misc"] = "其他",
             ["lbl.language"] = "界面语言：",
             ["opt.language_auto"] = "跟随游戏",
@@ -113,10 +100,8 @@ namespace CasualtiesUnknown.SaveManager
             ["update.available"] = "SaveManager 有新版本：{0}（点击打开 release 页）",
             ["btn.press_a_key"] = "请按下新按键…",
             ["btn.clear"] = "清除",
-            // 开关
             ["sw.on"] = "◀ 开",
             ["sw.off"] = "关 ▶",
-            // 存档 tab
             ["fmt.total_slots"] = "当前共有槽位：{0}",
             ["btn.expand_all"] = "全部展开",
             ["btn.collapse_all"] = "全部折叠",
@@ -132,7 +117,6 @@ namespace CasualtiesUnknown.SaveManager
             ["fmt.adventure_named"] = "冒险 #{0}    （{1}）",
             ["fmt.adventure_unknown"] = "未识别冒险    （{0}）",
             ["fmt.date_count"] = "{0}    （{1}）",
-            // 卡片
             ["lbl.tag_pinned"] = "[已标记]",
             ["lbl.tag_auto"] = "[自动]",
             ["lbl.tag_manual"] = "[手动]",
@@ -145,7 +129,6 @@ namespace CasualtiesUnknown.SaveManager
             ["btn.unpin"] = "取消标记",
             ["btn.pin"] = "标记保留",
             ["btn.delete"] = "删除",
-            // 回档 tab
             ["fmt.status_idle"] = "状态：空闲。当前没有进行中的回档任务。",
             ["fmt.status_idle_with_error"] = "状态：空闲。上次结果：{0}",
             ["fmt.status_counting"] = "状态：将在 {0} 秒后回档至 {1}",
@@ -158,7 +141,6 @@ namespace CasualtiesUnknown.SaveManager
             ["msg.no_rollback_targets"] = "  没有可回档的槽位。请在游戏中保存或开启自动备份。",
             ["msg.run_id_unresolved_mixed"] = "  警告：当前冒险身份未解析，下方列表可能混有其他冒险的备份；回档到其他冒险会进入不同世界。",
             ["msg.no_rollback_targets_filtered"] = "  当前日期筛选下没有槽位。",
-            // 业务 / 提示
             ["fmt.saved_to"] = "已保存：{0}（来源 {1}）",
             ["fmt.save_failed"] = "立即保存失败：{0}",
             ["fmt.auto_backup_done"] = "自动备份：{0}",
@@ -208,7 +190,7 @@ namespace CasualtiesUnknown.SaveManager
             ["sec.save_now"] = "Save Now",
             ["lbl.alias_optional"] = "Alias (optional):",
             ["btn.save_now"] = "Save Now",
-            ["btn.save_exit"] = "Save && Exit",
+            ["btn.save_exit"] = "Save & Exit",
             ["sec.auto_backup"] = "Auto Backup",
             ["sw.auto_backup_enabled"] = "Enable timed backup",
             ["sw.backup_before_overwrite"] = "Backup current save.sv before restore",
@@ -218,6 +200,7 @@ namespace CasualtiesUnknown.SaveManager
             ["sw.auto_rollback_enabled"] = "Enable auto rollback on death",
             ["fmt.rollback_delay"] = "Countdown seconds: {0:0.#}",
             ["fmt.mp_death_threshold"] = "Multiplayer death threshold: {0}",
+            ["lbl.mp_death_all"] = "Multiplayer trigger: All players dead (0)",
             ["fmt.recent_slots_limit"] = "Recent slots shown in Rollback tab: {0}",
             ["sec.world"] = "Deterministic World",
             ["lbl.world_engine"] = "Engine:",
@@ -338,25 +321,15 @@ namespace CasualtiesUnknown.SaveManager
             ["lbl.save_exit_alias"] = "Save & exit",
         };
 
-        /// <summary>当前语言判定：支持自定义中文包名称关键词，并允许配置强制切换 zh/en。</summary>
-        private static Dictionary<string, string> Current
-        {
-            get
-            {
-                return UseChinese() ? _zh : _en;
-            }
-        }
+        private static Dictionary<string, string> Current => UseChinese() ? _zh : _en;
 
         private static bool UseChinese()
         {
             switch (NormalizeLanguageMode(Plugin.PreferredLanguageMode))
             {
-                case "zh":
-                    return true;
-                case "en":
-                    return false;
-                default:
-                    return IsChineseLocaleName(ReadCurrentLanguageName());
+                case "zh": return true;
+                case "en": return false;
+                default: return IsChineseLocaleName(ReadCurrentLanguageName());
             }
         }
 
@@ -368,10 +341,25 @@ namespace CasualtiesUnknown.SaveManager
             {
                 try { name = PlayerPrefs.GetString("locale"); } catch { }
             }
+            if (string.IsNullOrEmpty(name))
+            {
+                try
+                {
+                    var sys = Application.systemLanguage;
+                    if (sys == SystemLanguage.Chinese
+                        || sys == SystemLanguage.ChineseSimplified
+                        || sys == SystemLanguage.ChineseTraditional)
+                    {
+                        return "zh-CN";
+                    }
+                }
+                catch { }
+            }
             return name;
         }
 
-        private static string NormalizeLanguageMode(string mode)
+        /// <summary>规范化语言模式配置值（auto / zh / en）。</summary>
+        internal static string NormalizeLanguageMode(string mode)
         {
             if (string.IsNullOrWhiteSpace(mode)) return "auto";
             mode = mode.Trim().ToLowerInvariant();
@@ -381,20 +369,17 @@ namespace CasualtiesUnknown.SaveManager
         private static bool IsChineseLocaleName(string name)
         {
             string normalized = StripRichText(name).Trim();
-            if (string.IsNullOrEmpty(normalized))
-            {
-                return false;
-            }
+            if (string.IsNullOrEmpty(normalized)) return false;
 
-            if (normalized.StartsWith("zh", System.StringComparison.OrdinalIgnoreCase)
-                || normalized.StartsWith("WC", System.StringComparison.OrdinalIgnoreCase))
+            if (normalized.StartsWith("zh", StringComparison.OrdinalIgnoreCase)
+                || normalized.StartsWith("WC", StringComparison.OrdinalIgnoreCase))
             {
                 return true;
             }
 
             for (int i = 0; i < ChineseKeywords.Length; i++)
             {
-                if (normalized.IndexOf(ChineseKeywords[i], System.StringComparison.OrdinalIgnoreCase) >= 0)
+                if (normalized.IndexOf(ChineseKeywords[i], StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     return true;
                 }
@@ -410,25 +395,14 @@ namespace CasualtiesUnknown.SaveManager
                 return value ?? string.Empty;
             }
 
-            var sb = new System.Text.StringBuilder(value.Length);
+            var sb = new StringBuilder(value.Length);
             bool inTag = false;
             for (int i = 0; i < value.Length; i++)
             {
                 char ch = value[i];
-                if (ch == '<')
-                {
-                    inTag = true;
-                    continue;
-                }
-                if (ch == '>')
-                {
-                    inTag = false;
-                    continue;
-                }
-                if (!inTag)
-                {
-                    sb.Append(ch);
-                }
+                if (ch == '<') { inTag = true; continue; }
+                if (ch == '>') { inTag = false; continue; }
+                if (!inTag) sb.Append(ch);
             }
 
             return sb.ToString();
@@ -436,16 +410,25 @@ namespace CasualtiesUnknown.SaveManager
 
         internal static string T(string key)
         {
-            if (Current.TryGetValue(key, out var v)) return v;
-            // 找不到 key 时回落到 key 本身做可见占位
-            return key;
+            return Current.TryGetValue(key, out var v) ? v : key;
         }
 
         internal static string F(string key, params object[] args)
         {
             string fmt = T(key);
-            try { return string.Format(fmt, args); }
-            catch { return fmt; }
+            try
+            {
+                return string.Format(fmt, args);
+            }
+            catch (FormatException ex)
+            {
+                ModLog.Warning($"I18n.F 格式化失败 key={key}：{ex.Message}");
+                return fmt;
+            }
+            catch
+            {
+                return fmt;
+            }
         }
     }
 }

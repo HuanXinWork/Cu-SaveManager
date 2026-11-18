@@ -1,31 +1,38 @@
+using System;
+using System.Collections;
 using HarmonyLib;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// 死亡回档处理中或死亡感知中时阻断游戏自带的"全员死亡 → 自动重生世界 / 自动回主菜单"流程。
-    /// 单机正常死亡场景由游戏自身 HandleDeathScreen 处理，不会走这两个方法；
-    /// 多人 host 端会在 ServerMain.AutoExitWhenAllDied 触发 ToMainMenu，DrillPod / WorldGenerationContinueRunPatch
-    /// 也会触发 RegenerateWorld。
-    /// 用 IsActiveGlobal || IsDeathSuspected 双判：从死亡判到的第一帧就拦截，比倒计时启动早。
-    /// </summary>
-    // 显式签名：WorldGeneration.RegenerateWorld(bool twice = false)，避免按名称解析时的重载二义性。
+    /// <summary>死亡感知或回档执行期间阻断 <c>WorldGeneration.RegenerateWorld</c> 自动重开世界，并返回空枚举器防止空协程异常。</summary>
     [HarmonyPatch(typeof(WorldGeneration), "RegenerateWorld", new[] { typeof(bool) })]
     internal static class WorldGenerationRegenerateWorldGuard
     {
-        private static bool Prefix()
+        private static bool Prefix(ref IEnumerator __result)
         {
-            return !(RollbackController.IsActiveGlobal || RollbackController.IsDeathSuspected);
+            if (RollbackController.IsActiveGlobal || RollbackController.IsDeathSuspected)
+            {
+                __result = Array.Empty<object>().GetEnumerator();
+                return false;
+            }
+            return true;
         }
     }
 
+    /// <summary>
+    /// 死亡感知或回档执行期间阻断非回档发起的 <c>PlayerCamera.ToMainMenu</c> 自动退回主菜单。
+    /// 必须先于 <c>CasualtiesMP</c> 的同名 Prefix 执行，防止全灭读秒回档前联机模组抢先注销网络实体并向客机广播 <c>CLIENT_GoBackToMainMenu</c>。
+    /// </summary>
     [HarmonyPatch(typeof(PlayerCamera), "ToMainMenu")]
+    [HarmonyPriority(Priority.First)]
+    [HarmonyBefore("CasualtiesMP")]
     internal static class PlayerCameraToMainMenuGuard
     {
-        private static bool Prefix()
-        {
-            if (MpRollbackController.ReturningToMenu) return true;
-            return !(RollbackController.IsActiveGlobal || RollbackController.IsDeathSuspected);
-        }
+        internal static bool ShouldBlock()
+            => !MpRollbackController.ReturningToMenu
+               && (RollbackController.IsActiveGlobal || RollbackController.IsDeathSuspected);
+
+        [HarmonyPrefix]
+        private static bool Prefix() => !ShouldBlock();
     }
 }

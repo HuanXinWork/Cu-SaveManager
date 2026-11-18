@@ -4,52 +4,58 @@ using UnityEngine;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// 回档 tab：状态条 + 取消按钮 + 最近列表 + 日期筛选。
-    /// 拆出来单独一个文件让 SaveManagerWindow 不再变胖。
-    /// </summary>
+    /// <summary>回档分页视图：展示回档倒计时状态、日期筛选与最近可回档槽位列表。</summary>
     internal sealed class RollbackTabView
     {
         private readonly HotkeyConfig _cfg;
         private readonly SaveStore _store;
         private readonly RollbackController _rollback;
+        private readonly Func<(List<SlotInfo> slots, int currentRunId)> _snapshotProvider;
+        private readonly Action _onSlotMutated;
 
         private Vector2 _scroll;
-        // 日期筛选：null = 不过滤；其余值是 dateFolder 字符串
         private string _dateFilter;
 
-        internal RollbackTabView(HotkeyConfig cfg, SaveStore store, RollbackController rollback)
+        internal RollbackTabView(
+            HotkeyConfig cfg,
+            SaveStore store,
+            RollbackController rollback,
+            Func<(List<SlotInfo> slots, int currentRunId)> snapshotProvider = null,
+            Action onSlotMutated = null)
         {
             _cfg = cfg;
             _store = store;
             _rollback = rollback;
+            _snapshotProvider = snapshotProvider;
+            _onSlotMutated = onSlotMutated;
         }
 
         internal void Draw()
         {
+            var (slots, currentRunId) = _snapshotProvider != null
+                ? _snapshotProvider()
+                : (_store.ListSlots(), SaveStore.ComputeCurrentRunId());
+
             DrawStatusBar();
 
             GUILayout.Space(8f);
-            DrawDateFilterRow();
+            DrawDateFilterRow(slots, currentRunId);
             GUILayout.Space(6f);
 
             _scroll = GUILayout.BeginScrollView(_scroll,
                 GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
 
             int limit = Mathf.Max(1, _cfg.RecentSlotsLimit.Value);
-            int currentRunId = SaveStore.ComputeCurrentRunId();
             if (currentRunId == 0)
             {
                 GUILayout.Label(I18n.T("msg.run_id_unresolved_mixed"), BlackWhiteSkin.CardStyle);
                 GUILayout.Space(4f);
             }
-            // ListSlots 已按 LastWriteTimeUtc 倒序，第一项即最新
-            var slots = _store.ListSlots();
+
             int shown = 0;
             foreach (var slot in slots)
             {
                 if (shown >= limit) break;
-                // 只显当前游玩的 run；当前 runId 解不出（主菜单 / 解析失败）时回退展示全部
                 if (currentRunId != 0 && slot.Sidecar.RunId != currentRunId) continue;
                 if (_dateFilter != null && slot.DateFolder != _dateFilter) continue;
                 if (slot.File.Name.StartsWith("beforeLoad-", StringComparison.Ordinal)) continue;
@@ -90,6 +96,7 @@ namespace CasualtiesUnknown.SaveManager
                         GUILayout.MinWidth(220f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(48f)))
                     {
                         _rollback.Cancel(I18n.T("msg.user_cancel"));
+                        GUIUtility.ExitGUI();
                     }
                     break;
                 case RollbackState.Executing:
@@ -100,12 +107,10 @@ namespace CasualtiesUnknown.SaveManager
             GUILayout.EndVertical();
         }
 
-        private void DrawDateFilterRow()
+        private void DrawDateFilterRow(List<SlotInfo> slots, int currentRunId)
         {
-            // 只列当前 run 涉及的日期；当前 runId 解不出时退化为全部
-            int currentRunId = SaveStore.ComputeCurrentRunId();
             var dates = new List<string>();
-            foreach (var s in _store.ListSlots())
+            foreach (var s in slots)
             {
                 if (currentRunId != 0 && s.Sidecar.RunId != currentRunId) continue;
                 if (!dates.Contains(s.DateFolder)) dates.Add(s.DateFolder);
@@ -117,7 +122,11 @@ namespace CasualtiesUnknown.SaveManager
                 _dateFilter == null ? BlackWhiteSkin.TabActiveStyle : BlackWhiteSkin.TabStyle,
                 GUILayout.MinWidth(120f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(36f)))
             {
-                _dateFilter = null;
+                if (_dateFilter != null)
+                {
+                    _dateFilter = null;
+                    GUIUtility.ExitGUI();
+                }
             }
             GUILayout.Space(8f);
             foreach (var d in dates)
@@ -127,7 +136,8 @@ namespace CasualtiesUnknown.SaveManager
                 if (GUILayout.Button(label, style,
                     GUILayout.MinWidth(160f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(36f)))
                 {
-                    _dateFilter = (_dateFilter == d) ? null : d;
+                    _dateFilter = _dateFilter == d ? null : d;
+                    GUIUtility.ExitGUI();
                 }
                 GUILayout.Space(6f);
             }
@@ -157,6 +167,8 @@ namespace CasualtiesUnknown.SaveManager
                 GUILayout.MinWidth(120f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(40f)))
             {
                 _rollback.RequestRollback(slot);
+                _onSlotMutated?.Invoke();
+                GUIUtility.ExitGUI();
             }
             GUI.enabled = true;
 
