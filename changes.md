@@ -2,6 +2,32 @@
 
 > English changelog: see [changes.en.md](changes.en.md)
 
+## 1.3.4
+
+修复与 Casualties: Together 5.5.x 不兼容、客户端进房后卡在物种选择界面的问题。1.3.3 摘掉了 Together 挂在 `PreRunScript.StartRun` 上的 Prefix，并对联机客户端提示 “You can't start the game, server can.” 后拦截；而 Together 5.5 起客户端的 Join / Ready up 正是由这个 Prefix（`CharacterSelectWait.OnStartOrLoadClicked`）处理，客户端因此既不能准备，也不能中途加入。现在不再摘除：联机房间内只要 Together 带有 `CharacterSelectWait`，`StartRun` 就整个放行给 Together，主机开新局也随之改走 Together 的准备大厅。
+
+未开房的单机态（装了 Together 但没有联机会话）改为在 Together 的 `StartRun` / `LoadRun` Prefix 上挂旁路守卫，开局与读档直接走原版流程，不再经过 Together 的单机拦截。
+
+多人死亡自动回档的阈值 `MultiplayerDeathThreshold` 默认值由 1 改为 0（全员阵亡才触发），配置里已有的 1 会在升级后首次启动时一次性改为 0；需要「死 N 人就回档」的可以手动设回 1–16。死亡触发的倒计时期间若不再满足死亡条件（例如队友被救活），倒计时自动取消。死亡判定或回档进行期间先于 Together 拦截 `PlayerCamera.ToMainMenu`，避免 Together 抢先注销网络实体并让全员退房。
+
+修复多人回档的几个问题：回档窗口期拦截 `ServerMain.LateSpawnLocation` 时补调 `PlayerCheckpoint.ReclaimGear`（1.3.3 整段跳过，远程玩家回档后拿不回检查点装备）；回档第一阶段退回主菜单时不再写入位置（会把回档前的现场写进刚还原的存档）；回到层底过层存档（`mp_rules.json` 的 `LEVEL=false`）时不再套用上一层出口的 `PLRPOS` 坐标；回档倒计时提示不再重复发给 P2P 主机自己。
+
+联机客户端进图时不再套用本地的新局世界引擎设置，并关闭 QoL 的种子干预，世界生成跟随主机；退回主菜单时清除从主机收到的种子状态，也不再把房间里的位置写进本地存档。
+
+适配 Together 5.5 存档新增的 `PLRCHARS`（玩家角色表）：回档重映射 persistentId 时与 `PLRPOS` 一并改写。特殊模式（`GamemodeManager.HasGamemode()`，如 BattleRoyale）进行中不做定时备份和死亡自动回档。
+
+阵亡或回档进行中不再允许手动保存、定时备份与保存并退出，避免把死档写进备份；联机时全队到达层底（按 Together 的 `CheckIfEnoughPeopleAreAtLayerFinish` 判定）跳过定时备份。记录存档位置时不再采用已死亡角色的坐标，并跳过 QoL 后台自动存档触发的写入。
+
+单机切换槽位读档时，只有槽位带位置信息且未安装 QoL 才把 `biome` 写回 `save.sv`，不再无条件改写。
+
+固定种子的世界生成改为在协程每一步保存、恢复各生成阶段自己的随机数状态，不受生成期间其它随机数消耗的影响；联机时不包装 Together 的外层握手协程，以免覆盖刚与主机同步的随机数状态。
+
+存档面板打开时拦截鼠标悬停与拖拽，不再穿透到面板下方。更新检查的版本号比较支持带 `-rc.1`、`+build` 后缀的标签，并统一按前三段比较。英文界面按钮文字 `Save && Exit` 改为 `Save & Exit`。
+
+新增 `Together.ModHooks` / `TogetherPanelApi` 的可选对接：Together 提供这些接口时改走官方钩子，没有时（包括当前 Steam 版 5.5.3）沿用补丁路径。
+
+本版还包含一轮全量代码审查的其它修复，逐项说明见 [docs/README.md](docs/README.md)。
+
 ## 1.3.3
 
 联机读档不再摘除 Together 的 `PreRunScript.LoadRun` Prefix，改为按「会话是否运行中」条件放行：联机时由 Together 走完整的角色选择与逐玩家读档流程，本模组只在单机（联机 mod 在场但未开房）时接管。`StartRun` 仍保留原接管（联机模组那侧的 Prefix 只会在单机时硬拦、在联机时额外打开 Ready 大厅），新开局体验不变。
