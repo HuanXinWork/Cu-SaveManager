@@ -1,17 +1,18 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using Newtonsoft.Json.Linq;
-using UnityEngine;
 using System.Linq;
 using System.Reflection;
+using System.Text;
+using Newtonsoft.Json.Linq;
+using UnityEngine;
 
 namespace CasualtiesUnknown.SaveManager
 {
-/// <summary>
- /// i18n with external files: each *.json in the localization folder is a separate language.
- /// The file name (without the extension) is the language code, for example, zh-CN.json, en.json.
- /// </summary>
+    /// <summary>
+    /// 本地化：每个 *.json 语言包对应一种语言，文件名（不含扩展名）即语言代码，例如 zh-CN.json、en.json。
+    /// 目录为空时释放内置的 en.json、zh.json。
+    /// </summary>
     internal static class I18n
     {
         private const string FallbackLanguage = "en";
@@ -24,7 +25,9 @@ namespace CasualtiesUnknown.SaveManager
         private static readonly Dictionary<string, Dictionary<string, string>> _languages =
             new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
 
-        /// <summary> Scans the folder and registers all languages. </summary>
+        private static readonly string[] DefaultLanguageFiles = { "en.json", "zh.json" };
+
+        /// <summary>扫描本地化目录并注册全部语言包。</summary>
         internal static void Init(string localizationDir)
         {
             Directory.CreateDirectory(localizationDir);
@@ -35,13 +38,6 @@ namespace CasualtiesUnknown.SaveManager
             }
 
             _languages.Clear();
-
-            if (!Directory.Exists(localizationDir))
-            {
-                Directory.CreateDirectory(localizationDir);
-                Debug.LogWarning("[SaveManager] The localization folder has been created, but there are no files: " + localizationDir);
-                return;
-            }
 
             foreach (string path in Directory.GetFiles(localizationDir, "*.json"))
             {
@@ -91,13 +87,13 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        /// <summary> Returns the language code that should be used now, or null if there is no suitable one. </summary>
+        /// <summary>返回当前应使用的语言代码；没有可用语言包时返回 null。</summary>
         private static string ResolveLanguageCode()
         {
             string mode = NormalizeLanguageMode(Plugin.PreferredLanguageMode);
             if (mode != "auto")
             {
-                return _languages.ContainsKey(mode) ? mode : null;
+                return mode;
             }
 
             string localeName = StripRichText(ReadCurrentLanguageName()).Trim();
@@ -129,31 +125,74 @@ namespace CasualtiesUnknown.SaveManager
             {
                 try { name = PlayerPrefs.GetString("locale"); } catch { }
             }
+            if (string.IsNullOrEmpty(name))
+            {
+                try
+                {
+                    SystemLanguage sys = Application.systemLanguage;
+                    if (sys == SystemLanguage.Chinese
+                        || sys == SystemLanguage.ChineseSimplified
+                        || sys == SystemLanguage.ChineseTraditional)
+                    {
+                        return "zh-CN";
+                    }
+                }
+                catch { }
+            }
             return name;
         }
 
-        private static string NormalizeLanguageMode(string mode)
+        /// <summary>规范化语言模式：auto 或任意已加载语言代码；旧值 zh 映射到第一个 zh* 语言包。</summary>
+        internal static string NormalizeLanguageMode(string mode)
         {
             if (string.IsNullOrWhiteSpace(mode)) return "auto";
-            return mode.Trim();
+
+            string value = mode.Trim();
+            if (string.Equals(value, "auto", StringComparison.OrdinalIgnoreCase))
+            {
+                return "auto";
+            }
+
+            foreach (string code in GetAvailableLanguageCodes())
+            {
+                if (string.Equals(code, value, StringComparison.OrdinalIgnoreCase))
+                {
+                    return code;
+                }
+            }
+
+            // 兼容旧配置里的 "zh"：取第一个以 zh 开头的语言包
+            if (string.Equals(value, "zh", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (string code in GetAvailableLanguageCodes())
+                {
+                    if (code.StartsWith("zh", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return code;
+                    }
+                }
+            }
+
+            return "auto";
         }
 
         private static bool IsChineseLocaleName(string name)
         {
-            if (string.IsNullOrEmpty(name))
+            string normalized = StripRichText(name).Trim();
+            if (string.IsNullOrEmpty(normalized))
             {
                 return false;
             }
 
-            if (name.StartsWith("zh", StringComparison.OrdinalIgnoreCase)
-                || name.StartsWith("WC", StringComparison.OrdinalIgnoreCase))
+            if (normalized.StartsWith("zh", StringComparison.OrdinalIgnoreCase)
+                || normalized.StartsWith("WC", StringComparison.OrdinalIgnoreCase))
             {
                 return true;
             }
 
             for (int i = 0; i < ChineseKeywords.Length; i++)
             {
-                if (name.IndexOf(ChineseKeywords[i], StringComparison.OrdinalIgnoreCase) >= 0)
+                if (normalized.IndexOf(ChineseKeywords[i], StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     return true;
                 }
@@ -169,7 +208,7 @@ namespace CasualtiesUnknown.SaveManager
                 return value ?? string.Empty;
             }
 
-            var sb = new System.Text.StringBuilder(value.Length);
+            var sb = new StringBuilder(value.Length);
             bool inTag = false;
             foreach (char ch in value)
             {
@@ -200,8 +239,19 @@ namespace CasualtiesUnknown.SaveManager
         internal static string F(string key, params object[] args)
         {
             string fmt = T(key);
-            try { return string.Format(fmt, args); }
-            catch { return fmt; }
+            try
+            {
+                return string.Format(fmt, args);
+            }
+            catch (FormatException ex)
+            {
+                ModLog.Warning($"I18n.F 格式化失败 key={key}：{ex.Message}");
+                return fmt;
+            }
+            catch
+            {
+                return fmt;
+            }
         }
 
         public static IEnumerable<string> GetAvailableLanguageCodes()
@@ -213,19 +263,16 @@ namespace CasualtiesUnknown.SaveManager
 
         public static string GetLanguageDisplayName(string code)
         {
-            Dictionary<string, string> dict;
-            if (_languages.TryGetValue(code, out dict))
+            if (_languages.TryGetValue(code, out Dictionary<string, string> dict)
+                && dict.TryGetValue("lang.name", out string name)
+                && !string.IsNullOrWhiteSpace(name))
             {
-                string name;
-                if (dict.TryGetValue("lang.name", out name) && !string.IsNullOrWhiteSpace(name))
-                    return name;
+                return name;
             }
             return code;
         }
-        private static readonly string[] DefaultLanguageFiles = { "en.json", "zh.json" };
 
-        ///<summary> Creates the default localization files (en.json and zh-CN.json) in the given
-        ///          folder when they do not already exist. </summary>
+        /// <summary>首次运行且没有任何语言包时，释放内置的 en.json、zh.json（不覆盖已有文件）。</summary>
         private static void EnsureDefaultLanguages(string localizationDir)
         {
             Assembly asm = typeof(I18n).Assembly;
@@ -235,14 +282,16 @@ namespace CasualtiesUnknown.SaveManager
             {
                 string target = Path.Combine(localizationDir, fileName);
                 if (File.Exists(target))
+                {
                     continue;
+                }
 
                 string resourceName = resources.FirstOrDefault(n =>
                     n.EndsWith("." + fileName, StringComparison.OrdinalIgnoreCase));
 
                 if (resourceName == null)
                 {
-                    Debug.LogWarning("[SaveManager] The built‑in resource " + fileName + " was not found in the assembly.");
+                    Debug.LogWarning("[SaveManager] The built-in resource " + fileName + " was not found in the assembly.");
                     continue;
                 }
 
@@ -251,7 +300,7 @@ namespace CasualtiesUnknown.SaveManager
                 {
                     stream.CopyTo(fs);
                 }
-                Debug.LogWarning("[SaveManager] A localization file has been created.: " + target);
+                Debug.LogWarning("[SaveManager] A localization file has been created: " + target);
             }
         }
     }

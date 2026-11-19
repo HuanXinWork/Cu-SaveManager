@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>供其它 mod 注册附加设置分页的入口；标题与底栏状态都用 Func 动态求值随宿主语言/状态实时变化。</summary>
+    /// <summary>外部模组设置分页注册表。</summary>
     public static class ExternalTabRegistry
     {
         public sealed class Entry

@@ -5,34 +5,28 @@ using HarmonyLib;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// 标记 SaveSystem.TryLoadGame 的执行窗口，供读档期兜底补丁判断时机。
-    /// </summary>
+    /// <summary>以嵌套深度计数跟踪 <c>SaveSystem.TryLoadGame</c> 执行窗口，兼容联机逐玩家递归读档。</summary>
     [HarmonyPatch(typeof(SaveSystem), "TryLoadGame")]
     internal static class SaveLoadWindowPatch
     {
-        internal static bool Active { get; private set; }
+        private static int _activeDepth;
+
+        internal static bool Active => _activeDepth > 0;
 
         private static void Prefix()
         {
-            Active = true;
-            CustomContainerLoadFixPatch.ResetApplied();
+            if (_activeDepth == 0) CustomContainerLoadFixPatch.ResetApplied();
+            _activeDepth++;
         }
 
         private static void Finalizer()
         {
-            Active = false;
-            CustomContainerLoadFixPatch.ResetApplied();
+            if (_activeDepth > 0) _activeDepth--;
+            if (_activeDepth == 0) CustomContainerLoadFixPatch.ResetApplied();
         }
     }
 
-    /// <summary>
-    /// 读档兜底：CUCoreLib 的自定义容器容量（ContainerProperties，如超级银河皮带的 maxWeight=9999）
-    /// 要到 Item.Start 的 postfix 才应用，而 TryLoadGame 在同一帧就用 Container.LoadItem 把内容物塞回容器，
-    /// 此时容器还是模板预制体（smallpack）的默认小容量，CanHoldItem 失败导致内容物静默掉落/丢失。
-    /// 在读档窗口内、LoadItem 之前先通过 CUCoreLib 把自定义容器属性应用到位。软依赖：CUCoreLib 不在则跳过。
-    /// </summary>
-    // 显式签名：Container.LoadItem(Item)，避免按名称解析时的重载二义性。
+    /// <summary>读档窗口内在 <c>Container.LoadItem</c> 前提前调用 CUCoreLib 应用自定义容器容量，避免装填时按预制体小容量丢弃物品。</summary>
     [HarmonyPatch(typeof(Container), "LoadItem", new[] { typeof(Item) })]
     internal static class CustomContainerLoadFixPatch
     {
@@ -66,7 +60,12 @@ namespace CasualtiesUnknown.SaveManager
             _resolveTried = true;
             Type type = AccessTools.TypeByName("CUCoreLib.Patches.ItemRegistryPatches");
             if (type != null)
-                _applyCustomItemRuntime = AccessTools.Method(type, "ApplyCustomItemRuntime");
+            {
+                _applyCustomItemRuntime = AccessTools.Method(
+                    type,
+                    "ApplyCustomItemRuntime",
+                    new[] { typeof(Item), typeof(bool) });
+            }
             if (_applyCustomItemRuntime == null)
                 ModLog.Info("CUCoreLib ApplyCustomItemRuntime 不可用，读档自定义容器容量兜底未启用");
             return _applyCustomItemRuntime;

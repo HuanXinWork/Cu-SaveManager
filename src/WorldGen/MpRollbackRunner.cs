@@ -6,30 +6,20 @@ using UnityEngine;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>供 MpPositionRestorer 在主线程延迟写回位置：等世界生成结束后执行一次，再回调结束会话。</summary>
-    /// <remarks>
-    /// 世界生成结束判定走 CasualtiesTogetherUtils.Util.IsWorldGenerated()；
-    /// 该成员缺失时回落到等价的本体判定（WorldGeneration.world 存在且不在 generatingWorld）。
-    /// </remarks>
+    /// <summary>多人回档主线程协程调度器：负责阶段二进局延迟缓冲与世界生成后的玩家坐标持续写回。</summary>
     internal sealed class MpRollbackRunner : MonoBehaviour
     {
         private static bool _resolveTried;
         private static MethodInfo _mIsWorldGenerated;
 
+        private Coroutine _positionCoroutine;
+        private Coroutine _reloadCoroutine;
+
         internal static MpRollbackRunner Instance { get; private set; }
 
         internal static void Ensure(Plugin plugin)
         {
-            if (Instance != null)
-            {
-                return;
-            }
-
-            if (plugin == null)
-            {
-                return;
-            }
-
+            if (Instance != null || plugin == null) return;
             Instance = plugin.gameObject.AddComponent<MpRollbackRunner>();
         }
 
@@ -39,25 +29,132 @@ namespace CasualtiesUnknown.SaveManager
             hideFlags = HideFlags.HideAndDontSave;
         }
 
-        /// <summary>等世界生成结束后执行 <paramref name="apply"/>，随后执行 <paramref name="onComplete"/>。</summary>
         internal void RunOnceAfterWorldGenerated(Action apply, Action onComplete = null)
         {
-            if (apply == null)
+            if (apply == null) return;
+            StartCoroutine(ApplyOnceCoroutine(apply, onComplete));
+        }
+
+        /// <summary>等待世界生成完成后按固定间隔重试尚未就绪的玩家坐标，直至全员还原、超时或退出联机。</summary>
+        internal void RunPositionRestoreWindow(
+            Func<bool> stepRestore,
+            Action onComplete,
+            float timeoutSeconds = 15f,
+            float retryIntervalSeconds = 0.25f)
+        {
+            if (stepRestore == null)
             {
+                onComplete?.Invoke();
                 return;
             }
 
-            StartCoroutine(ApplyAfterWorldGenerated(apply, onComplete));
+            if (_positionCoroutine != null)
+            {
+                StopCoroutine(_positionCoroutine);
+                _positionCoroutine = null;
+            }
+
+            _positionCoroutine = StartCoroutine(PositionRestoreWindowCoroutine(
+                stepRestore, onComplete, timeoutSeconds, retryIntervalSeconds));
         }
 
-        private static IEnumerator ApplyAfterWorldGenerated(Action apply, Action onComplete)
+        /// <summary>延迟等待客户端切回主菜单后再触发联机继续游戏，避免客户端仍在旧场景时丢弃开局广播。</summary>
+        internal void ScheduleStageTwoReload(Action execute, float delaySeconds = 0.75f, float maxWaitSeconds = 2f)
+        {
+            if (execute == null) return;
+
+            if (_reloadCoroutine != null)
+            {
+                StopCoroutine(_reloadCoroutine);
+                _reloadCoroutine = null;
+            }
+
+            _reloadCoroutine = StartCoroutine(StageTwoReloadCoroutine(execute, delaySeconds, maxWaitSeconds));
+        }
+
+        private static IEnumerator ApplyOnceCoroutine(Action apply, Action onComplete)
         {
             yield return new WaitUntil(IsWorldGenerated);
             apply();
             onComplete?.Invoke();
         }
 
-        /// <summary>世界生成结束判定；对应 CasualtiesTogetherUtils.Util.IsWorldGenerated()。</summary>
+        private IEnumerator PositionRestoreWindowCoroutine(
+            Func<bool> stepRestore,
+            Action onComplete,
+            float timeoutSeconds,
+            float retryIntervalSeconds)
+        {
+            float elapsed = 0f;
+            try
+            {
+                while (!IsWorldGenerated())
+                {
+                    if (!MultiplayerBridge.IsMultiplayerRunning() || elapsed >= timeoutSeconds)
+                    {
+                        yield break;
+                    }
+                    elapsed += Time.unscaledDeltaTime;
+                    yield return null;
+                }
+
+                while (MultiplayerBridge.IsMultiplayerRunning())
+                {
+                    bool allRestored = false;
+                    try
+                    {
+                        allRestored = stepRestore();
+                    }
+                    catch (Exception ex)
+                    {
+                        ModLog.Warning($"MpRollbackRunner 坐标重试异常：{ex.Message}");
+                    }
+
+                    if (allRestored || elapsed >= timeoutSeconds)
+                    {
+                        break;
+                    }
+
+                    float slice = 0f;
+                    while (slice < retryIntervalSeconds)
+                    {
+                        if (!MultiplayerBridge.IsMultiplayerRunning())
+                        {
+                            yield break;
+                        }
+                        float dt = Time.unscaledDeltaTime;
+                        slice += dt;
+                        elapsed += dt;
+                        yield return null;
+                    }
+                }
+            }
+            finally
+            {
+                _positionCoroutine = null;
+                onComplete?.Invoke();
+            }
+        }
+
+        private IEnumerator StageTwoReloadCoroutine(Action execute, float delaySeconds, float maxWaitSeconds)
+        {
+            float elapsed = 0f;
+            while (elapsed < delaySeconds)
+            {
+                elapsed += Time.unscaledDeltaTime;
+                yield return null;
+            }
+
+            while (PreRunScript.instance == null && elapsed < maxWaitSeconds)
+            {
+                elapsed += Time.unscaledDeltaTime;
+                yield return null;
+            }
+
+            _reloadCoroutine = null;
+            execute();
+        }
+
         private static bool IsWorldGenerated()
         {
             MethodInfo method = ResolveIsWorldGenerated();
@@ -71,19 +168,10 @@ namespace CasualtiesUnknown.SaveManager
             return WorldGeneration.world != null && !WorldGeneration.world.generatingWorld;
         }
 
-        /// <summary>解析 CasualtiesTogetherUtils.Util.IsWorldGenerated()；缺失时记一次 WarnOnce 并返回 null。</summary>
         private static MethodInfo ResolveIsWorldGenerated()
         {
-            if (_resolveTried)
-            {
-                return _mIsWorldGenerated;
-            }
-
-            if (TogetherReflection.ModAssembly == null)
-            {
-                // 联机模组尚未加载：不置解析标记，下次再试。
-                return null;
-            }
+            if (_resolveTried) return _mIsWorldGenerated;
+            if (TogetherReflection.ModAssembly == null) return null;
 
             _resolveTried = true;
             if (TogetherReflection.TryResolveType("CasualtiesTogetherUtils.Util", out Type utilType))
@@ -94,7 +182,7 @@ namespace CasualtiesUnknown.SaveManager
             if (_mIsWorldGenerated == null)
             {
                 InteropDiagnostics.WarnOnce("MpRollbackRunner.IsWorldGenerated",
-                    "CasualtiesTogetherUtils.Util.IsWorldGenerated() 未解析到，多人回档位置写回改用本体判定 WorldGeneration.world != null && !generatingWorld");
+                    "CasualtiesTogetherUtils.Util.IsWorldGenerated() 未解析到，多人回档位置写回改用 WorldGeneration.world != null && !generatingWorld");
             }
 
             return _mIsWorldGenerated;

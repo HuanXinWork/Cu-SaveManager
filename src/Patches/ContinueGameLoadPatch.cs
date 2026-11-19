@@ -1,22 +1,42 @@
 using System;
 using System.IO;
+using System.Reflection;
 using HarmonyLib;
+using UnityEngine;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// 读档前按存档恢复所选角色；非联机会话时再按单机 save.sv 准备世界与 sidecar。
-    /// </summary>
-    /// <remarks>
-    /// 原版只在 PreRunScript.LoadRun 方法体里做 characterSelected = savedCharacter。本模组会用 Prefix 返回 false
-    /// 接管读档，面板也可能在 PreRunScript.Start 之后才换档，少了这步 PlayerCamera.Awake 就永远生成 Experiment。
-    /// </remarks>
+    /// <summary>读档最前置补丁（Priority 800）：恢复存档角色，并在非联机会话下按当前单机存档与 sidecar 准备世界状态。</summary>
     [HarmonyPatch(typeof(PreRunScript), "LoadRun")]
     [HarmonyPriority(Priority.First)]
     internal static class ContinueGameLoadPatch
     {
+        private static readonly FieldInfo StartedLoadingField = AccessTools.Field(typeof(PreRunScript), "startedLoading");
+
+        internal static bool IsStartedLoading(PreRunScript instance)
+            => instance != null && StartedLoadingField?.GetValue(instance) is bool v && v;
+
+        internal static void SetStartedLoading(PreRunScript instance, bool value)
+        {
+            if (instance != null) StartedLoadingField?.SetValue(instance, value);
+        }
+
+        internal static bool IsTutorialIncomplete()
+            => PlayerPrefs.GetInt("didbasiccourse", 0) == 0;
+
+        internal static bool ShouldDeferToVanillaGate(PreRunScript instance)
+            => instance != null && (IsStartedLoading(instance) || IsTutorialIncomplete());
+
+        internal static bool HasSingleplayerSave()
+        {
+            string qolPath = QolBridge.GetCurrentSaveFilePath();
+            return (!string.IsNullOrEmpty(qolPath) && File.Exists(qolPath)) || SaveStore.CurrentSaveExists();
+        }
+
         private static void Prefix(PreRunScript __instance)
         {
+            if (ShouldDeferToVanillaGate(__instance)) return;
+
             try
             {
                 ModLog.Flow("LoadRun", "01", "入口 mpPresent=" + MultiplayerBridge.IsModPresent()
@@ -24,22 +44,21 @@ namespace CasualtiesUnknown.SaveManager
                     + " mpRunning=" + MultiplayerBridge.IsMultiplayerRunning()
                     + " mpServer=" + MultiplayerBridge.IsServer()
                     + " save.sv=" + File.Exists(MpSaveLocator.VanillaSavePath)
+                    + " qolSave=" + (QolBridge.GetCurrentSaveFilePath() ?? "<none>")
                     + " mpSave=" + MpSaveLocator.HasMpSave()
                     + " mpLocal=" + (MpSaveLocator.ResolveLocalPlayerSavePath() ?? "<none>"));
 
-                RestoreCharacterFromSaveFile(__instance);
+                PlayerCharacterBridge.Apply(PlayerCharacterBridge.ResolveCurrentSavePath(), __instance);
 
                 if (MultiplayerBridge.IsMultiplayerRunning())
                 {
-                    ModLog.Flow("LoadRun", "02", "联机会话运行中 → 跳过单机世界准备（由 LoadRunPrefixReplacer 处理）");
+                    ModLog.Flow("LoadRun", "02", "联机会话运行中 → 跳过单机世界准备");
                     return;
                 }
 
-                // 单机（含联机模组在场未开房）必须按 save.sv 准备世界：
-                // 否则 LoadRunPrefixReplacer 会用旧 mp_save 覆盖引擎/种子/位置/难度。
-                if (!SaveStore.CurrentSaveExists())
+                if (!HasSingleplayerSave())
                 {
-                    ModLog.Flow("LoadRun", "03", "没有当前 save.sv → 跳过单机世界准备");
+                    ModLog.Flow("LoadRun", "03", "没有可用单机存档 → 跳过单机世界准备");
                     return;
                 }
 
@@ -51,9 +70,5 @@ namespace CasualtiesUnknown.SaveManager
                 ModLog.Warning($"ContinueGameLoadPatch 失败：{ex.Message}");
             }
         }
-
-        /// <summary>从当前存档恢复角色（联机运行中读本地玩家 mp_save，单机读 save.sv）。</summary>
-        private static void RestoreCharacterFromSaveFile(PreRunScript instance)
-            => PlayerCharacterBridge.Apply(PlayerCharacterBridge.ResolveCurrentSavePath(), instance);
     }
 }

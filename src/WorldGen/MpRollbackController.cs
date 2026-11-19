@@ -1,36 +1,43 @@
 using System;
 using HarmonyLib;
-using UnityEngine;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// 多人回档两阶段触发：仅主机可用。
-    /// 阶段一（游戏内）：mp_save 已被还原后，调 PlayerCamera.ToMainMenu 让全员回主菜单并置待回档标志。
-    /// 阶段二（回到主菜单）：PreRunScript.Start 后调 Together.WorldMP.LoadVanillaGeneratedWorld(true) 走联机模组原生继续游戏读档。
-    /// </summary>
+    /// <summary>多人回档两阶段状态控制：先由主机携全员退回主菜单，待客户端同步回大厅后再发起继续游戏。</summary>
     internal static class MpRollbackController
     {
         private static bool _pendingHostReload;
 
-        /// <summary>多人回档正在让主机回主菜单的窗口期；GameAutoRespawnGuard 据此放行这次 ToMainMenu。</summary>
+        /// <summary>主机正在执行回档退回主菜单的窗口标志，供 GameAutoRespawnGuard 放行 ToMainMenu。</summary>
         internal static bool ReturningToMenu { get; private set; }
 
-        /// <summary>阶段一：标记待回档并让主机回主菜单。要求调用前 mp_save 已被槽位 zip 覆盖还原。</summary>
+        /// <summary>多人两阶段回档是否仍处于挂起推进中（阶段一退回大厅或阶段二等待进图）。</summary>
+        internal static bool IsPendingReload => _pendingHostReload || ReturningToMenu;
+
         internal static void TriggerHostReload()
         {
             _pendingHostReload = true;
             ModLog.Info(I18n.T("mp.rollback_returning_menu"));
-            ModLog.Debug("多人回档两阶段重载：阶段一（置待回档标志=true，mp_save 已还原，让主机 ToMainMenu 回主菜单）");
+            ModLog.Debug("多人回档阶段一：置待回档标志并调用 ToMainMenu");
             ReturningToMenu = true;
             try
             {
                 var cam = PlayerCamera.main;
-                if (cam != null) cam.ToMainMenu();
-                else ModLog.Warning("PlayerCamera.main 为空，多人回档无法回主菜单");
+                if (cam != null)
+                {
+                    cam.ToMainMenu();
+                }
+                else
+                {
+                    _pendingHostReload = false;
+                    AbortPendingRestore();
+                    ModLog.Warning("PlayerCamera.main 为空，多人回档无法回主菜单");
+                }
             }
             catch (Exception ex)
             {
+                _pendingHostReload = false;
+                AbortPendingRestore();
                 ModLog.Warning($"MpRollbackController.TriggerHostReload 失败：{ex.Message}");
             }
             finally
@@ -39,32 +46,64 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        /// <summary>阶段二：主菜单 PreRunScript 就绪后调用。待回档且为主机时走联机模组的继续游戏。</summary>
         internal static void OnPreRunReady()
         {
             if (!_pendingHostReload) return;
             _pendingHostReload = false;
-            ModLog.Debug("多人回档两阶段重载：阶段二（主菜单 PreRunScript 就绪）isServer=" + MultiplayerBridge.IsServer());
+            ModLog.Debug("多人回档阶段二：PreRunScript 就绪 isServer=" + MultiplayerBridge.IsServer());
             if (!MultiplayerBridge.IsServer())
             {
+                AbortPendingRestore();
                 ModLog.Warning("待多人回档但当前非主机，已取消");
                 return;
             }
+
+            var runner = MpRollbackRunner.Instance;
+            if (runner != null)
+            {
+                runner.ScheduleStageTwoReload(ExecuteStageTwoReload);
+            }
+            else
+            {
+                ExecuteStageTwoReload();
+            }
+        }
+
+        private static void ExecuteStageTwoReload()
+        {
+            if (!MultiplayerBridge.IsServer())
+            {
+                AbortPendingRestore();
+                ModLog.Warning("多人回档阶段二延迟结束后已非主机，已取消");
+                return;
+            }
+
             try
             {
                 ModLog.Info(I18n.T("mp.rollback_reloading"));
-                // 阶段二在主菜单直接进世界，不经过 PreRunScript.LoadRun（Awake 已把 characterSelected 置 0），
-                // 按刚还原的本地玩家 mp_save 把角色写回去。
+                MultiplayerBridge.SetPendingLoadMpSave(true);
+                // 阶段二绕过 PreRunScript.LoadRun 直接进世界，需在切场景前按还原存档写回本地角色选择。
                 PlayerCharacterBridge.ApplyForSceneReload();
-                bool continued = MultiplayerBridge.TryLoadMultiplayerContinue();
-                ModLog.Debug("多人回档两阶段重载：阶段二继续游戏调用结果=" + continued);
+                bool continued = MultiplayerBridge.TryLoadMultiplayerContinue(loadsave: true);
+                ModLog.Debug("多人回档阶段二：继续游戏调用结果=" + continued);
                 if (!continued)
+                {
+                    AbortPendingRestore();
                     ModLog.Warning("多人回档：联机模组继续游戏调用失败");
+                }
             }
             catch (Exception ex)
             {
-                ModLog.Warning($"MpRollbackController.OnPreRunReady 失败：{ex.Message}");
+                AbortPendingRestore();
+                ModLog.Warning($"MpRollbackController.ExecuteStageTwoReload 失败：{ex.Message}");
             }
+        }
+
+        private static void AbortPendingRestore()
+        {
+            MultiplayerBridge.SetPendingLoadMpSave(false);
+            ApplyLayerModifiersRestorePatch.PendingIndex = -2;
+            MpPositionRestorer.CancelSession();
         }
     }
 

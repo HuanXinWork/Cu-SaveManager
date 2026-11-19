@@ -5,42 +5,30 @@ using HarmonyLib;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// 在联机模组 StartRun 的 Prefix 方法上再挂一层 return false 的 Prefix，让原 Prefix 体不执行。
-    /// </summary>
-    /// <remarks>
-    /// 目标方法：Together.PreRunScript_StartRun_MultiplayerPatch.Prefix，按类型简单名在联机模组程序集内定位，
-    /// 再按名称 + 形参个数取 Prefix。
-    /// 为什么需要它：HarmonyX 的 Prefix 返回值只汇总成"原方法是否执行"，**不会**阻止后续 Prefix 执行
-    /// （HarmonyX 2.9 HarmonyManipulator.WritePrefixes 把所有 Prefix 都调完再统一判断）。所以本模组
-    /// 无法靠 return true/false 阻止联机模组的 StartRun Prefix：它在单机时会硬拦原版开局，联机时会额外
-    /// 打开 Ready 大厅。这里先尝试 Unpatch，摘不掉时用本类短路原 Prefix 兜底。
-    /// LoadRun 不需要它：联机读档必须放行联机模组的 Prefix。
-    /// </remarks>
+    /// <summary>在联机模组启用但未开房的单机态下，旁路 <c>Together</c> 对 <c>StartRun</c> 与 <c>LoadRun</c> 的单机禁玩拦截；联机运行态原样放行。</summary>
     internal static class MpHarmonySilencer
     {
-        /// <summary>联机模组的 Harmony owner id，也是 Unpatch 使用的 owner 前缀。</summary>
+        /// <summary>联机模组的 Harmony 实例 ID。</summary>
         internal const string OwnerId = "CasualtiesMP";
 
         private const string StartRunPatchTypeName = "PreRunScript_StartRun_MultiplayerPatch";
+        private const string LoadRunPatchTypeName = "PreRunScript_LoadRun_MultiplayerPatch";
 
-        /// <summary>摘不掉联机模组 StartRun Prefix 时短路它；<paramref name="startRunDetached"/> 表示对应 Prefix 已被摘掉。</summary>
-        internal static void TrySilence(Harmony harmony, bool startRunDetached)
+        internal static bool StartRunGuarded { get; private set; }
+        internal static bool LoadRunGuarded { get; private set; }
+
+        internal static void TrySilence(Harmony harmony)
         {
             if (harmony == null || TogetherReflection.ModAssembly == null)
             {
                 return;
             }
 
-            if (startRunDetached)
-            {
-                return;
-            }
-
-            SilenceOne(harmony, StartRunPatchTypeName);
+            StartRunGuarded = GuardOne(harmony, StartRunPatchTypeName);
+            LoadRunGuarded = GuardOne(harmony, LoadRunPatchTypeName);
         }
 
-        private static void SilenceOne(Harmony harmony, string typeName)
+        private static bool GuardOne(Harmony harmony, string typeName)
         {
             try
             {
@@ -48,39 +36,58 @@ namespace CasualtiesUnknown.SaveManager
                 if (type == null)
                 {
                     InteropDiagnostics.WarnOnce("MpHarmonySilencer." + typeName,
-                        "Together." + typeName + " 未解析到，联机模组的 StartRun Prefix 既未摘掉也无法短路（单机新开局会被它硬拦，联机新开局会进 Ready 大厅）");
-                    return;
+                        "Together." + typeName + " 未解析到，无法挂载单机旁路守卫");
+                    return false;
                 }
 
-                MethodInfo prefix = InteropReflection.FindMethod(type, "Prefix", new Type[] { null });
+                MethodInfo prefix = InteropReflection.FindMethod(type, "Prefix", new Type[] { null })
+                    ?? InteropReflection.FindMethod(type, "Prefix", Type.EmptyTypes);
                 if (prefix == null)
                 {
                     InteropDiagnostics.WarnOnce("MpHarmonySilencer.Prefix." + typeName,
-                        "Together." + typeName + ".Prefix 未解析到，联机模组的 StartRun Prefix 既未摘掉也无法短路");
-                    return;
+                        "Together." + typeName + ".Prefix 未解析到，无法挂载单机旁路守卫");
+                    return false;
                 }
+
+                string guardName = prefix.ReturnType == typeof(bool)
+                    ? nameof(BypassBoolWhenSingleplayer)
+                    : nameof(BypassVoidWhenSingleplayer);
 
                 Patches info = Harmony.GetPatchInfo(prefix);
                 if (info?.Prefixes != null)
                 {
                     foreach (Patch patch in info.Prefixes)
                     {
-                        if (patch.owner == harmony.Id && patch.PatchMethod?.Name == nameof(BlockMpPrefix))
+                        if (patch.owner == harmony.Id && patch.PatchMethod?.Name == guardName)
                         {
-                            return;
+                            return true;
                         }
                     }
                 }
 
-                harmony.Patch(prefix, prefix: new HarmonyMethod(typeof(MpHarmonySilencer), nameof(BlockMpPrefix)));
-                ModLog.Info($"已短路 Together.{typeName}.Prefix");
+                harmony.Patch(prefix, prefix: new HarmonyMethod(typeof(MpHarmonySilencer), guardName));
+                ModLog.Info($"已挂载单机旁路守卫 Together.{typeName}.Prefix");
+                return true;
             }
             catch (Exception ex)
             {
-                ModLog.Warning($"短路 Together.{typeName}.Prefix 失败：{ex.Message}");
+                ModLog.Warning($"挂载 Together.{typeName}.Prefix 单机旁路守卫失败：{ex.Message}");
+                return false;
             }
         }
 
-        private static bool BlockMpPrefix() => false;
+        private static bool BypassBoolWhenSingleplayer(ref bool __result)
+        {
+            if (!MultiplayerBridge.IsMultiplayerEnabled() || MultiplayerBridge.IsMultiplayerRunning())
+            {
+                return true;
+            }
+
+            __result = true;
+            return false;
+        }
+
+        private static bool BypassVoidWhenSingleplayer()
+            => !MultiplayerBridge.IsMultiplayerEnabled() || MultiplayerBridge.IsMultiplayerRunning();
     }
 }

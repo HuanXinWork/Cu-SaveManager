@@ -7,20 +7,7 @@ using HarmonyLib;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>多人固定世界种子跨端广播：复用联机模组的种子公告包，在负载之后追加本模组种子。</summary>
-    /// <remarks>
-    /// 复用的联机模组成员：
-    ///   · Together.ServerMain.Server_AnnounceSeed(IReadOnlyList&lt;knetid&gt;) —— 主机广播种子公告；
-    ///   · Together.NetmsgId.GenerateWorld_SeedAnnounce —— 该公告的消息号（byte 枚举）；
-    ///   · Together.WorldGeneration_GenerateWorld_MultiplayerPatch.firstworldgenparams —— 公告负载（LastBeforeGenerationState）；
-    ///   · Together.Net.CreateWriter(byte) / Together.MyLiteNetLibExtensions.Put&lt;T&gt; / Together.Net.Server_SendToClientsVeryReliable
-    ///     —— 主机接管发送时按原实现重建同一个包；
-    ///   · Together.ClientMain.ClientReceiver__GenerateWorld_SeedAnnounce(knetid, NetDataReader) —— 客户端读回公告的接收器。
-    /// 主机（self 引擎）接管 Server_AnnounceSeed：写入同一结构体后追加 1 个 int 种子再发出；
-    /// 客户端在接收器之后读包尾 int，非 0 即激活逐阶段重置。非 self 引擎主机不接管（原版包无尾部 int），
-    /// 客户端按 NetDataReader.AvailableBytes 判定并回落联机模组原生世界生成。
-    /// 成员缺失时记一次 WarnOnce 并整体降级为「多人固定世界种子广播不可用」，不在运行时静默 no-op。
-    /// </remarks>
+    /// <summary>在 Together.ServerMain.Server_AnnounceSeed 公告包尾追加 4 字节 self 引擎种子，供客户端同步逐阶段确定化。</summary>
     internal static class MpSeedBroadcast
     {
         private static bool _patched;
@@ -38,8 +25,12 @@ namespace CasualtiesUnknown.SaveManager
 
         internal static void TryPatch()
         {
-            if (_patched)
+            if (_patched) return;
+            TogetherModHooksBridge.TryBindAll();
+            if (TogetherModHooksBridge.HasWorldSeedHook)
             {
+                _patched = true;
+                ModLog.Info("多人种子广播已由 Together.ModHooks 世界种子钩子原生接管");
                 return;
             }
 
@@ -53,7 +44,6 @@ namespace CasualtiesUnknown.SaveManager
                 Type tState = TogetherReflection.FindType("LastBeforeGenerationState");
                 Type tMsgId = TogetherReflection.FindType("NetmsgId");
                 Type tKnetid = TogetherReflection.FindType("knetid");
-                // 联机模组尚未加载：不置 _patched，留待世界生成时重试。
                 if (tNet == null || tExtensions == null || tServer == null || tClient == null
                     || tWorldGenPatch == null || tState == null || tMsgId == null || tKnetid == null)
                 {
@@ -89,7 +79,7 @@ namespace CasualtiesUnknown.SaveManager
                 _mCreateWriter = InteropReflection.FindMethod(tNet, "CreateWriter", msgIdType);
                 if (_mCreateWriter == null)
                 {
-                    missing.Add("Together.Net.CreateWriter(byte)");
+                    missing.Add("Together.Net.CreateWriter(NetmsgId)");
                 }
 
                 Type writerType = _mCreateWriter?.ReturnType;
@@ -147,7 +137,7 @@ namespace CasualtiesUnknown.SaveManager
                 harmony.Patch(_mSeedReceiver, postfix: new HarmonyMethod(
                     self.GetMethod(nameof(SeedAnnounce_Postfix), BindingFlags.Static | BindingFlags.NonPublic)));
                 _patched = true;
-                ModLog.Info("多人种子广播已挂载（接管 Together.ServerMain.Server_AnnounceSeed 追加种子 / 客户端读取激活）");
+                ModLog.Info("多人种子广播已挂载（Together.ServerMain.Server_AnnounceSeed / ClientReceiver）");
             }
             catch (Exception ex)
             {
@@ -155,7 +145,8 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        /// <summary>取 Together.NetmsgId.GenerateWorld_SeedAnnounce 的字节值；缺失时记入 <paramref name="missing"/>。</summary>
+        internal static void ResetPatchState() => _patched = false;
+
         private static byte ResolveSeedMessageId(Type msgIdType, List<string> missing)
         {
             try
@@ -170,13 +161,9 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        /// <summary>取 Together.MyLiteNetLibExtensions.Put&lt;T&gt; 并按状态结构体闭合泛型。</summary>
         private static MethodInfo FindStateWriter(Type extensionsType, Type writerType, Type stateType)
         {
-            if (extensionsType == null || writerType == null)
-            {
-                return null;
-            }
+            if (extensionsType == null || writerType == null) return null;
 
             MethodInfo definition = extensionsType
                 .GetMethods(BindingFlags.Public | BindingFlags.Static)
@@ -184,10 +171,7 @@ namespace CasualtiesUnknown.SaveManager
                     && m.IsGenericMethodDefinition
                     && m.GetParameters().Length == 2
                     && InteropReflection.StripByRef(m.GetParameters()[0].ParameterType) == writerType);
-            if (definition == null)
-            {
-                return null;
-            }
+            if (definition == null) return null;
 
             try
             {
@@ -199,12 +183,9 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        /// <summary>
-        /// 主机 self 引擎：接管公告，原结构体之后追加 CurrentSeed 后整包发出（return false 取代原方法）。
-        /// 非 self 引擎或非主机放行原版（无尾部 int，客户端按 AvailableBytes 自然回落）。
-        /// </summary>
         private static bool AnnounceSeed_Prefix(object[] __args)
         {
+            if (TogetherModHooksBridge.HasWorldSeedHook) return true;
             object toWho = (__args != null && __args.Length > 0) ? __args[0] : null;
             if (!(SeededWorldEngine.IsActive && MultiplayerBridge.IsServer()))
             {
@@ -226,37 +207,28 @@ namespace CasualtiesUnknown.SaveManager
             }
             catch (Exception ex)
             {
-                // 接管失败则放行原版（发出不含尾部 int 的干净包），客户端据 AvailableBytes 回落，不会读到脏数据。
+                SeededWorldEngine.MpReseedEnabled = false;
                 ModLog.Warning($"MpSeedBroadcast.AnnounceSeed_Prefix 异常，回落原版广播：{ex.Message}");
                 return true;
             }
         }
 
-        /// <summary>客户端：种子公告包读完后若包尾还有 int 则读出；非 0 即激活逐阶段重置使世界与主机/同种子单机一致。</summary>
+        /// <summary>客户端读取包尾追加种子；原版包或种子为 0 时关闭 self 引擎以清除上一局残留状态。</summary>
         private static void SeedAnnounce_Postfix(object[] __args)
         {
+            if (TogetherModHooksBridge.HasWorldSeedHook) return;
             try
             {
-                if (MultiplayerBridge.IsServer())
-                {
-                    return;
-                }
-
-                if (__args == null || __args.Length < 2)
-                {
-                    return;
-                }
+                if (MultiplayerBridge.IsServer()) return;
+                if (__args == null || __args.Length < 2) return;
 
                 object reader = __args[1];
-                if (reader == null)
-                {
-                    return;
-                }
+                if (reader == null) return;
 
                 int available = Convert.ToInt32(_pAvailableBytes.GetValue(reader));
                 if (available < sizeof(int))
                 {
-                    SeededWorldEngine.MpReseedEnabled = false;
+                    SeededWorldEngine.Deactivate();
                     return;
                 }
 
@@ -269,7 +241,7 @@ namespace CasualtiesUnknown.SaveManager
                 }
                 else
                 {
-                    SeededWorldEngine.MpReseedEnabled = false;
+                    SeededWorldEngine.Deactivate();
                 }
             }
             catch (Exception ex)

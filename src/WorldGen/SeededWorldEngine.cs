@@ -2,22 +2,16 @@ using System;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// saveManager 自带的确定化世界生成种子源。IsActive 为真时 SeededWorldPatcher 会在
-    /// WorldGeneration 各阶段 Prefix 用 LayerSeed 重置 UnityEngine.Random，使地形与实体可复现。
-    /// 种子优先级：手动输入 > 存档字节 FNV-1a 派生。
-    /// </summary>
+    /// <summary>本模组固定世界生成引擎的种子状态与层种子派生。</summary>
     internal static class SeededWorldEngine
     {
         internal static bool IsActive { get; private set; }
         internal static int CurrentSeed { get; private set; }
         internal static string InputString { get; private set; } = "";
 
-        /// <summary>多人下是否启用逐阶段种子重置：主机/客户端确认拿到固定世界种子后置真，
-        /// 使多人世界与同种子单机一致。仅多人路径用；单机由 IsActive 决定。</summary>
+        /// <summary>多人模式下本端是否已确认固定世界种子并启用逐阶段随机流隔离。</summary>
         internal static bool MpReseedEnabled { get; set; }
 
-        /// <summary>用手动输入设种子。空串关闭确定化；纯数字直接当种子，否则取字符串稳定 hash。</summary>
         internal static void SetManualSeed(string input)
         {
             InputString = input ?? "";
@@ -28,12 +22,13 @@ namespace CasualtiesUnknown.SaveManager
                 ModLog.Flow("Seed", "01", "SetManualSeed 空 → 关闭确定化");
                 return;
             }
+
+            int parsed = int.TryParse(input, out int v) ? v : StableHash(input);
+            CurrentSeed = parsed != 0 ? parsed : 1;
             IsActive = true;
-            CurrentSeed = int.TryParse(input, out int v) ? v : StableHash(input);
             ModLog.Flow("Seed", "01", "SetManualSeed input='" + input + "' → seed=" + CurrentSeed);
         }
 
-        /// <summary>用指定种子与输入串直接激活（回档/读档时按 sidecar 还原用）。</summary>
         internal static void Activate(int seed, string input)
         {
             CurrentSeed = seed != 0 ? seed : 1;
@@ -42,7 +37,6 @@ namespace CasualtiesUnknown.SaveManager
             ModLog.Flow("Seed", "02", "Activate seed=" + CurrentSeed + " input='" + InputString + "'（传入 seed=" + seed + "）");
         }
 
-        /// <summary>新开局时生成一个一次性随机种子并激活。</summary>
         internal static void EnsureFreshSeed()
         {
             int seed = Guid.NewGuid().GetHashCode();
@@ -62,9 +56,7 @@ namespace CasualtiesUnknown.SaveManager
             ModLog.Flow("Seed", "04", "Deactivate（self 引擎关闭）");
         }
 
-        /// <summary>当前层的种子：基础种子叠加 totalTraveled 偏移，保证逐层不同但可复现。
-        /// totalTraveled 取「当前层」值：进层时内存已递增用内存值；初次读档内存尚未填充（GenerateWorld 早于
-        /// TryLoadGame）则回落磁盘 save.sv 值。与 MpWorldSeedInjector 取值口径一致，避免广播种子与逐阶段重置错配。</summary>
+        /// <summary>按基础种子与当前层 totalTraveled 派生层种子；初次读档内存未填充时回退读取磁盘存档。</summary>
         internal static int LayerSeed()
         {
             int traveled = 0;

@@ -32,6 +32,7 @@
     { "key": "sw.auto_rollback_enabled", "value": "Enable auto rollback on death" },
     { "key": "fmt.rollback_delay", "value": "Countdown seconds: {0:0.#}" },
     { "key": "fmt.mp_death_threshold", "value": "Multiplayer death threshold: {0}" },
+    { "key": "lbl.mp_death_all", "value": "Multiplayer trigger: All players dead (0)" },
     { "key": "fmt.recent_slots_limit", "value": "Recent slots shown in Rollback tab: {0}" },
     { "key": "sec.world", "value": "Deterministic World" },
     { "key": "lbl.world_engine", "value": "Engine:" },

@@ -3,18 +3,30 @@ using HarmonyLib;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// Postfix patch <see cref="WorldGeneration"/>.SaveAndExit：
-    /// 游戏暂停菜单自带的"保存并退出"不走本模组流程，这里在它写完 save.sv 后补建一个槽位。
-    /// 方法体是 SaveGame() 后接 ToMainMenu()，场景真正卸载在本帧末，故 Postfix 里存档文件已就绪。
-    /// </summary>
+    /// <summary>拦截原生 <c>WorldGeneration.SaveAndExit</c>，在退回主菜单清空实时状态前抓拍种子并在实际执行后补建槽位。</summary>
     [HarmonyPatch(typeof(WorldGeneration), "SaveAndExit")]
     internal static class GameSaveExitPatch
     {
-        private static void Postfix()
+        private static void Prefix()
         {
+            try { Plugin.OnBeforeGameSaveAndExit(); }
+            catch (Exception ex) { ModLog.Warning($"游戏保存并退出前置抓拍异常：{ex.Message}"); }
+        }
+
+        private static void Postfix(bool __runOriginal)
+        {
+            if (!__runOriginal)
+            {
+                Plugin.ClearBeforeGameSaveAndExit();
+                return;
+            }
             try { Plugin.OnGameSaveAndExit(); }
             catch (Exception ex) { ModLog.Warning($"游戏保存并退出补建槽位异常：{ex.Message}"); }
+        }
+
+        private static void Finalizer()
+        {
+            Plugin.ClearBeforeGameSaveAndExit();
         }
     }
 }

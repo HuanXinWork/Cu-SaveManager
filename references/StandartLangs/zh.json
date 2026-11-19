@@ -32,6 +32,7 @@
     { "key": "sw.auto_rollback_enabled", "value": "启用死亡自动回滚" },
     { "key": "fmt.rollback_delay", "value": "倒计时秒数：{0:0.#}" },
     { "key": "fmt.mp_death_threshold", "value": "多人死亡阈值：{0}" },
+    { "key": "lbl.mp_death_all", "value": "多人模式触发条件：全员死亡（0）" },
     { "key": "fmt.recent_slots_limit", "value": "回滚页显示的最近存档位数：{0}" },
     { "key": "sec.world", "value": "确定性世界" },
     { "key": "lbl.world_engine", "value": "引擎：" },

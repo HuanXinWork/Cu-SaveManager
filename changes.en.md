@@ -2,6 +2,32 @@
 
 > 中文更新日志：见 [changes.md](changes.md)
 
+## 1.3.4
+
+Fixed the incompatibility with Casualties: Together 5.5.x where a client got stuck on the species selection screen after joining a lobby. 1.3.3 unpatched Together's prefix on `PreRunScript.StartRun` and blocked connected clients with "You can't start the game, server can."; from Together 5.5 on, that prefix (`CharacterSelectWait.OnStartOrLoadClicked`) is exactly what handles the client's Join / Ready up, so clients could neither ready up nor join a running game. The prefix is no longer removed: inside a lobby, whenever Together has `CharacterSelectWait`, `StartRun` is passed through to Together entirely, which also means the host's new run now goes through Together's ready lobby.
+
+Single-player with Together installed but no session running now uses a bypass guard attached to Together's own `StartRun` / `LoadRun` prefixes, so starting and loading go straight through the vanilla flow without hitting Together's single-player block.
+
+The multiplayer auto-rollback death threshold `MultiplayerDeathThreshold` now defaults to 0 (trigger only when everyone is dead) instead of 1; an existing value of 1 in the config is changed to 0 once on the first launch after updating. Set it back to 1–16 by hand if you want "roll back after N deaths". A death-triggered countdown is cancelled automatically when the death condition no longer holds (e.g. a teammate was revived). While a death is being handled or a rollback is in progress, `PlayerCamera.ToMainMenu` is intercepted before Together, so Together cannot unregister network objects and send everyone out of the room first.
+
+Multiplayer rollback fixes: when `ServerMain.LateSpawnLocation` is suppressed during the rollback window, `PlayerCheckpoint.ReclaimGear` is now still called (1.3.3 skipped the whole method, so remote players did not get their checkpoint gear back); phase one's return to the main menu no longer writes positions (it wrote the pre-rollback state into the save that had just been restored); rolling back to a layer-transition save (`LEVEL=false` in `mp_rules.json`) no longer applies the previous layer's exit coordinates from `PLRPOS`; the rollback countdown alert is no longer sent back to the P2P host itself.
+
+Connected clients no longer apply their local new-run world engine settings when entering a world, and QoL's seed intervention is turned off for them, so world generation follows the host. On returning to the main menu the seed state received from the host is cleared, and the room's position is no longer written into the local save.
+
+Adapted to `PLRCHARS` (per-player character table) added to saves by Together 5.5: it is rewritten together with `PLRPOS` when persistent IDs are remapped on rollback. While a special game mode is active (`GamemodeManager.HasGamemode()`, e.g. BattleRoyale), timed backups and death auto-rollback are skipped.
+
+Manual save, timed backup and save-and-exit are refused while the player is dead or a rollback is in progress, so a dead state cannot end up in a backup; in multiplayer, timed backups are skipped when the team is at the layer exit according to Together's own check (`CheckIfEnoughPeopleAreAtLayerFinish`). A dead character's coordinates are no longer recorded as the save position, and writes triggered by QoL's background autosave are skipped.
+
+When loading a single-player slot, `biome` is written back to `save.sv` only if the slot carries a position and QoL is not installed, instead of unconditionally.
+
+Fixed-seed world generation now saves and restores each generation phase's own random state on every coroutine step, so it is not affected by other random draws during generation. In multiplayer, Together's outer handshake coroutine is not wrapped, so the random state just synchronised with the host is not overwritten.
+
+Mouse hover and drag are blocked while the save panel is open, so they no longer pass through to what is underneath. The update check's version comparison now handles tags with `-rc.1` / `+build` suffixes and always compares the first three parts. The English button text `Save && Exit` is now `Save & Exit`.
+
+Added optional integration with `Together.ModHooks` / `TogetherPanelApi`: when Together provides them the official hooks are used; otherwise (including the current Steam build 5.5.3) the patch path is kept.
+
+This version also includes the remaining fixes from a full code review; see [docs/README.md](docs/README.md) (in Chinese) for the item-by-item list.
+
 ## 1.3.3
 
 Multiplayer loading no longer unpatches Together's `PreRunScript.LoadRun` prefix. It now gates on "is a session running": while connected, Together runs its full character-selection and per-player load flow; this mod only takes over in single-player (multiplayer mod loaded, no session). `StartRun` keeps the old takeover (Together's prefix there only hard-blocks single-player and opens an extra Ready lobby when connected), so starting a new run feels unchanged.

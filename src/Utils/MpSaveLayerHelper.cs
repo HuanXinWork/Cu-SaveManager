@@ -3,11 +3,7 @@ using System.IO;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// 多人存档层数处理：Together 按玩家子目录存 save.sv，且 GenerateWorld 在 TryLoadGame 之前捕获 totalTraveled。
-    /// 须从磁盘 save.sv 读层信息（对齐单机 NormalizeSaveBiome 思路）。
-    /// mp_rules.json 的 LEVEL / MODIFIER 由联机模组按存档时刻的层内状态写入，本类只输出诊断日志，不改写。
-    /// </summary>
+    /// <summary>读取存档持久化的 totalTraveled 层深，并在快照后规范化 mp_save 内各玩家存档的 biome 字段。</summary>
     internal static class MpSaveLayerHelper
     {
         internal static int ReadTotalTraveledFromSv(string fullPath)
@@ -16,26 +12,28 @@ namespace CasualtiesUnknown.SaveManager
             {
                 if (string.IsNullOrEmpty(fullPath) || !File.Exists(fullPath)) return 0;
                 string json = SaveSystem.Unzip(File.ReadAllBytes(fullPath));
-                return ParseIntField(json, "\"totalTraveled\":");
+                return TopJson.TryReadInt(json, "totalTraveled", out int v) ? v : 0;
             }
-            catch { return 0; }
+            catch
+            {
+                return 0;
+            }
         }
 
-        /// <summary>回档/读档前从磁盘取 totalTraveled（单机 save.sv / 联机本地玩家 mp_save），供 layerSeed 计算。</summary>
+        /// <summary>读档或回档前从磁盘存档读取 totalTraveled，供层种子计算。</summary>
         internal static int ReadPersistedTotalTraveled()
         {
             if (!SaveSystem.loadedRun) return 0;
             string path = MpSaveLocator.IsMultiplayerSaveActive()
-                ? MpSaveLocator.ResolveLocalPlayerSavePath()
-                : MpSaveLocator.VanillaSavePath;
+                ? (MpSaveLocator.ResolveOwnSavePath() ?? MpSaveLocator.ResolveLocalPlayerSavePath())
+                : QolBridge.GetCurrentSaveFilePath();
             if (path == null || !File.Exists(path)) return 0;
             int v = ReadTotalTraveledFromSv(path);
             ModLog.Info($"层深：save.sv totalTraveled={v}（{path}）");
             return v;
         }
 
-        /// <summary>SaveGame 后规范化 mp_save 内各玩家 save.sv 的 biome，并输出 mp_rules.json 的层状态诊断。
-        /// rewriteBiome=false 时不改写 biome。mp_rules.json 一律不改写。</summary>
+        /// <summary>保存快照后按需将 mp_save 内各玩家 save.sv 的 biome 规范回当前层，并记录 mp_rules.json 状态。</summary>
         internal static void NormalizeAfterSnapshot(int biomeDepth, bool rewriteBiome)
         {
             if (!MpSaveLocator.HasMpSave()) return;
@@ -62,16 +60,10 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        /// <summary>输出 mp_rules.json 的 LEVEL / MODIFIER / PLRPOS 诊断行，不改写文件。</summary>
-        /// <remarks>
-        /// 旧版曾无条件改写为 LEVEL=true、MODIFIER=-1：LEVEL 被强制 true 会把地表存档当层内存档，
-        /// MODIFIER 被强制 -1 则让层内回档永久丢掉本层词条（联机模组读档时按 MODIFIER 还原 LayerModifier）。
-        /// 因此这里只记原值，供排查时对照。
-        /// </remarks>
-        /// <param name="stage">调用时机描述，写进日志</param>
+        /// <summary>记录 mp_rules.json 的原始层状态；LEVEL 与 MODIFIER 由联机模组管理，本模组不改写。</summary>
         private static void ReportMpRules(string stage)
         {
-            ModLog.Info($"mp_rules 原值（{stage}）：{MpRulesJson.Describe(MpSaveLocator.MpRulesPath)}；本 mod 不改写 LEVEL/MODIFIER");
+            ModLog.Info($"mp_rules 原值（{stage}）：{MpRulesJson.Describe(MpSaveLocator.MpRulesPath)}；保持 LEVEL/MODIFIER 原值");
         }
 
         internal static void NormalizeSaveBiomeField(string fullPath, int biomeDepth)
@@ -82,7 +74,7 @@ namespace CasualtiesUnknown.SaveManager
                 byte[] bytes = File.ReadAllBytes(fullPath);
                 string json = SaveSystem.Unzip(bytes);
                 if (string.IsNullOrEmpty(json)) return;
-                string rewritten = ReplaceJsonInt(json, "biome", biomeDepth);
+                string rewritten = TopJson.ReplaceInt(json, "biome", biomeDepth);
                 if (string.Equals(rewritten, json, StringComparison.Ordinal)) return;
                 File.WriteAllBytes(fullPath, SaveSystem.Zip(rewritten));
             }
@@ -90,36 +82,6 @@ namespace CasualtiesUnknown.SaveManager
             {
                 ModLog.Warning($"NormalizeSaveBiomeField 失败 {fullPath}: {ex.Message}");
             }
-        }
-
-        private static int ParseIntField(string json, string key)
-        {
-            int idx = json.IndexOf(key, StringComparison.Ordinal);
-            if (idx < 0) return 0;
-            int p = idx + key.Length;
-            while (p < json.Length && char.IsWhiteSpace(json[p])) p++;
-            int start = p;
-            if (start < json.Length && json[start] == '-') p++;
-            while (p < json.Length && char.IsDigit(json[p])) p++;
-            if (p == start) return 0;
-            int.TryParse(json.Substring(start, p - start), out int v);
-            return v;
-        }
-
-        private static string ReplaceJsonInt(string json, string field, int value)
-        {
-            string key = "\"" + field + "\"";
-            int idx = json.IndexOf(key, StringComparison.Ordinal);
-            if (idx < 0) return json;
-            int colon = json.IndexOf(':', idx + key.Length);
-            if (colon < 0) return json;
-            int start = colon + 1;
-            while (start < json.Length && char.IsWhiteSpace(json[start])) start++;
-            int end = start;
-            if (end < json.Length && json[end] == '-') end++;
-            while (end < json.Length && (char.IsDigit(json[end]) || json[end] == '.' || json[end] == 'e' || json[end] == 'E' || json[end] == '+' || json[end] == '-')) end++;
-            if (end <= start) return json;
-            return json.Substring(0, start) + value.ToString() + json.Substring(end);
         }
     }
 }

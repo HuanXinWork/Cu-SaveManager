@@ -4,14 +4,12 @@ using HarmonyLib;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// QoL 的出生清陷阱（SeededRunPatcher.RemoveNearbyTrapsLikeVanilla）按名字匹配陷阱表清场，
-    /// 不区分世界陷阱与玩家随身物品，导致背包/容器里的抗辐射药等每次进层被删。
-    /// 用本模组"仅清世界物体"的版本整体替换其实现。软依赖：QoL 不在则跳过。
-    /// </summary>
+    /// <summary>self 引擎启用时将 QoL SeededRunPatcher.RemoveNearbyTrapsLikeVanilla 转交本模组处理。</summary>
     internal static class QolTrapClearGuard
     {
         private static bool _patched;
+
+        internal static void ResetPatchState() => _patched = false;
 
         internal static void TryPatch()
         {
@@ -20,18 +18,21 @@ namespace CasualtiesUnknown.SaveManager
             {
                 Type t = AccessTools.TypeByName("QoL_Unknown.SeededRunPatcher");
                 if (t == null) return;
+
                 MethodInfo m = t.GetMethod("RemoveNearbyTrapsLikeVanilla",
                     BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
                 if (m == null)
                 {
-                    ModLog.Warning("QoL RemoveNearbyTrapsLikeVanilla 未找到，随身陷阱类物品保护未挂载");
+                    ModLog.Warning("QoL RemoveNearbyTrapsLikeVanilla 未找到，随身物品保护接管跳过");
+                    _patched = true;
                     return;
                 }
+
                 var harmony = new Harmony("com.casualtiesUnknown.saveManager.qolTrapClearGuard");
                 harmony.Patch(m, prefix: new HarmonyMethod(typeof(QolTrapClearGuard).GetMethod(
                     nameof(SafeClearInstead), BindingFlags.Static | BindingFlags.NonPublic)));
                 _patched = true;
-                ModLog.Info("QoL 出生清陷阱已替换为仅清世界物体版本（保护随身抗辐射药等物品）");
+                ModLog.Info("QoL 出生清陷阱接管已挂载（仅 self 引擎启用时生效）");
             }
             catch (Exception ex)
             {
@@ -41,6 +42,7 @@ namespace CasualtiesUnknown.SaveManager
 
         private static bool SafeClearInstead()
         {
+            if (!SeededWorldEngine.IsActive) return true;
             SelfSpawnPatcher.RemoveNearbyTrapsLikeVanilla();
             return false;
         }

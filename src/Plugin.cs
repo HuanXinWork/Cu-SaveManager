@@ -1,27 +1,23 @@
 using System;
+using System.IO;
 using BepInEx;
 using BepInEx.Logging;
 using CasualtiesUnknown.SaveManager.Interop;
 using UnityEngine;
-using System.IO;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// 协调者：装配 HotkeyConfig / SaveStore / OverlayUI / SaveManagerWindow。
-    /// 处理快捷键分发、定时备份调度。具体能力放在各专职文件里。
-    /// </summary>
+    /// <summary>插件主入口：装配配置、存档仓库、UI 面板与回档状态机，调度快捷键与定时自动备份。</summary>
     [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
     [BepInDependency("CasualtiesMP", BepInDependency.DependencyFlags.SoftDependency)]
-    // 声明对 QoL Unknown 的软依赖，让 BepInEx 把它排在本插件之前。
-    // 否则 QoL 排在后面，本插件 Awake 时刻解析不到它的成员，种子/自动备份联动会被降级成自有引擎。
+    // 软依赖确保 QoL 先于本插件加载，Awake 阶段即可解析其静态成员。
     [BepInDependency(QolGuid, BepInDependency.DependencyFlags.SoftDependency)]
     public sealed class Plugin : BaseUnityPlugin
     {
         private const string PluginGuid = "com.casualtiesUnknown.saveManager";
         private const string QolGuid = "org.bepinex.plugins.qol_unknown";
         private const string PluginName = "CuSaveManager";
-        internal const string PluginVersion = "1.3.3";
+        internal const string PluginVersion = "1.3.4";
 
         private static ManualLogSource _log;
         private static Plugin _instance;
@@ -36,9 +32,15 @@ namespace CasualtiesUnknown.SaveManager
         private string _lastMessage;
         private float _lastMessageAt;
 
+        private bool _inPanelSaveExit;
+        private bool _panelSaveExitBuiltSlot;
+        private bool _inGameSaveExitHook;
+
         private static bool _quitting;
 
         internal static string PreferredLanguageMode => _instance?._cfg?.PreferredLanguage?.Value ?? "auto";
+
+        internal static void ClosePanelIfOpen() => _instance?._window?.ClosePanel();
 
         private void Awake()
         {
@@ -84,21 +86,23 @@ namespace CasualtiesUnknown.SaveManager
             MenuButtonUiInjector.Setup(() => _window.OpenPanel());
 
             ResetAutoBackupTimer();
-            // 用 Application.quitting 而非 OnApplicationQuit：在 Plugin 实例销毁前触发，可保证
-            // Harmony unpatch 在游戏方法被最后一次调用前完成。
+            // 订阅 Application.quitting 而非 OnApplicationQuit，确保在插件对象销毁前先卸载 Harmony 补丁。
             Application.quitting += OnApplicationQuitting;
             ModLog.Info($"{PluginName} ready · slots→{_store.SlotsRoot} · save.sv={SaveStore.GameSavePath}");
-            ModLog.Info(MultiplayerBridge.IsModPresent() ? I18n.T("mp.mod_detected") : I18n.T("mp.mod_not_detected"));
+            ModLog.Info(MultiplayerBridge.IsMultiplayerRunning() || MultiplayerBridge.IsModPresent()
+                ? I18n.T("mp.mod_detected") : I18n.T("mp.mod_not_detected"));
             ModLog.Info(QolBridge.IsQolPresent() ? I18n.T("qol.mod_detected") : I18n.T("qol.mod_not_detected"));
             LogInteropResolution();
+            TogetherModHooksBridge.TryBindAll();
             MpWorldSeedInjector.TryPatch();
             MpSeedBroadcast.TryPatch();
             MpRollbackRunner.Ensure(this);
             MpPositionRestorer.TryPatchHarmony();
+            QolSpawnSuppressor.TryPatch();
+            QolTrapClearGuard.TryPatch();
             gameObject.AddComponent<UpdateChecker>();
         }
 
-        /// <summary>把互操作层的成员解析结果写进日志，便于比对目标插件版本变动。</summary>
         private void LogInteropResolution()
         {
             try
@@ -114,6 +118,8 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
+        private void OnDestroy() => OnApplicationQuitting();
+
         private void OnApplicationQuitting()
         {
             if (_quitting) return;
@@ -121,6 +127,7 @@ namespace CasualtiesUnknown.SaveManager
             try { _rollback?.Dispose(); } catch { }
             try { MenuButtonUiInjector.Dispose(); } catch { }
             try { OnPanelClosed(); } catch { }
+            try { BlackWhiteSkin.Dispose(); } catch { }
             try { Application.quitting -= OnApplicationQuitting; } catch { }
         }
 
@@ -140,23 +147,27 @@ namespace CasualtiesUnknown.SaveManager
         private void LateUpdate()
         {
             if (_quitting) return;
-            ImGuiImeRecovery.TickUpdate(_window.ExpectsTextInput);
+            bool expectsInput = _window.ExpectsTextInput;
+            ImGuiImeRecovery.TickUpdate(expectsInput);
+
+            // 游戏 ESC 已被 PlayerCameraHandleInputGuard 拦截，在此优先取消改键录制或关闭主面板。
+            if (_window.Open && Input.GetKeyDown(KeyCode.Escape))
+            {
+                if (_window.IsCapturingKey) _window.CancelKeyCapture();
+                else _window.ClosePanel();
+                return;
+            }
+
+            if (expectsInput) return;
 
             if (HotkeyConfig.TriggeredThisFrame(_cfg.ToggleSlotsHotkey))
             {
                 if (_window.Open) _window.ClosePanel();
                 else _window.OpenPanel();
             }
-            // ESC 关闭主面板。PlayerCameraHandleInputGuard 已 Prefix 吞掉游戏 ESC，
-            // 必须在这里独立处理才能让面板关闭。
-            if (_window.Open && Input.GetKeyDown(KeyCode.Escape))
-            {
-                _window.ClosePanel();
-            }
             if (HotkeyConfig.TriggeredThisFrame(_cfg.ToggleSettingsHotkey))
             {
-                _window.OpenPanel();
-                _window.CancelKeyCapture();
+                _window.OpenSettingsTab();
             }
             if (HotkeyConfig.TriggeredThisFrame(_cfg.QuickSaveHotkey))
             {
@@ -168,25 +179,45 @@ namespace CasualtiesUnknown.SaveManager
         {
             if (_quitting) return;
             ImGuiImeRecovery.TickOnGui(_window.ExpectsTextInput);
-            _overlay.Draw(() => _window.OpenPanel());
+            if (!_window.Open) _overlay.Draw(() => _window.OpenPanel());
             _window.Draw();
         }
 
         private void OnDisable()
         {
-            // mod 卸载时确保游戏 UI 状态恢复
             OnPanelClosed();
         }
 
-        // —— 业务回调 —— //
+        private static bool HasValidLivePlayerForSave(bool dedicatedServer)
+        {
+            if (RollbackController.IsDeathSuspected || RollbackController.IsActiveGlobal) return false;
+            if (WorldGeneration.world == null) return false;
+            if (dedicatedServer) return true;
+            var cam = PlayerCamera.main;
+            return cam != null && cam.body != null && cam.body.alive;
+        }
+
+        private static bool IsMpTeamAtLayerFinish()
+        {
+            if (!MultiplayerBridge.IsMultiplayerRunning() || !MultiplayerBridge.IsServer()) return false;
+            return MultiplayerBridge.TryCheckTeamAtLayerFinish(out bool atFinish)
+                ? atFinish
+                : SaveStore.IsPlayerAtLayerBoundary();
+        }
 
         private void SaveManual(string nickname)
         {
             try
             {
-                if (MultiplayerBridge.IsMultiplayerRunning() && !MultiplayerBridge.IsServer())
+                bool mpRunning = MultiplayerBridge.IsMultiplayerRunning();
+                if (mpRunning && !MultiplayerBridge.IsServer())
                 {
                     SetMessage(I18n.T("mp.client_cannot_save"));
+                    return;
+                }
+                if (!HasValidLivePlayerForSave(mpRunning && MultiplayerBridge.IsDedicatedServer()))
+                {
+                    SetMessage(I18n.T("msg.save_exit_unavailable"));
                     return;
                 }
                 if (!GameSaveBridge.CanSnapshotCurrentLayer())
@@ -194,13 +225,20 @@ namespace CasualtiesUnknown.SaveManager
                     SetMessage(I18n.T("msg.save_layer_transition"));
                     return;
                 }
-                if (MultiplayerBridge.IsMultiplayerRunning())
-                    MultiplayerBridge.TrySaveMpGame();
-                else
-                    GameSaveBridge.TrySaveGame();
+
+                bool saved = mpRunning
+                    ? MultiplayerBridge.TrySaveMpGame()
+                    : GameSaveBridge.TrySaveGame();
+                if (!saved)
+                {
+                    SetMessage(I18n.T("msg.save_exit_unavailable"));
+                    return;
+                }
+
                 string path = _store.SaveManual(nickname);
+                _window?.InvalidateSlotCache();
                 ModLog.Flow("UI", "11", "手动保存完成 " + path + " nickname='" + (nickname ?? "") + "'");
-                SetMessage(I18n.F("fmt.saved_to", System.IO.Path.GetFileName(path), SaveStore.CurrentSaveDisplayPath));
+                SetMessage(I18n.F("fmt.saved_to", Path.GetFileName(path), SaveStore.CurrentSaveDisplayPath));
             }
             catch (Exception ex)
             {
@@ -213,23 +251,34 @@ namespace CasualtiesUnknown.SaveManager
         {
             try
             {
-                if (PlayerCamera.main == null || WorldGeneration.world == null) return;
-                if (MultiplayerBridge.IsMultiplayerRunning() && !MultiplayerBridge.IsServer())
+                if (MultiplayerBridge.IsDedicatedServer()) return;
+                bool mpRunning = MultiplayerBridge.IsMultiplayerRunning();
+                if (mpRunning && !MultiplayerBridge.IsServer())
                 {
                     ModLog.Info(I18n.T("mp.client_skip_autosave"));
                     return;
                 }
-                if (!GameSaveBridge.CanSnapshotCurrentLayer())
+                if (mpRunning && MultiplayerBridge.IsGamemodeActive())
+                {
+                    return;
+                }
+                if (!HasValidLivePlayerForSave(dedicatedServer: false)) return;
+                if (!GameSaveBridge.CanSnapshotCurrentLayer() || (mpRunning && IsMpTeamAtLayerFinish()))
                 {
                     ModLog.Info(I18n.T("msg.save_skip_layer_transition"));
                     return;
                 }
-                // 先调 SaveSystem.SaveGame 让游戏把内存里的物品 / 装备 / 状态写到 save.sv，
-                // 否则槽位拷的是上一次进层的旧快照，回档会丢身上的物品。
-                GameSaveBridge.TrySaveGame();
+
+                // 先触发游戏落盘当前内存物品与身体状态，成功后再打包槽位。
+                bool saved = mpRunning
+                    ? MultiplayerBridge.TrySaveMpGame()
+                    : GameSaveBridge.TrySaveGame();
+                if (!saved) return;
+
                 string path = _store.AutoBackup(_cfg.AutoBackupKeep.Value);
+                _window?.InvalidateSlotCache();
                 ModLog.Flow("UI", "12", "自动备份完成 " + path + " keep=" + _cfg.AutoBackupKeep.Value);
-                ModLog.Info(I18n.F("fmt.auto_backup_done", System.IO.Path.GetFileName(path)));
+                ModLog.Info(I18n.F("fmt.auto_backup_done", Path.GetFileName(path)));
             }
             catch (Exception ex)
             {
@@ -241,19 +290,25 @@ namespace CasualtiesUnknown.SaveManager
         {
             try
             {
-                if (PlayerCamera.main == null || PlayerCamera.main.body == null || WorldGeneration.world == null)
+                bool mpRunning = MultiplayerBridge.IsMultiplayerRunning();
+                if (mpRunning && !MultiplayerBridge.IsServer())
+                {
+                    SetMessage(I18n.T("mp.client_cannot_save"));
+                    return;
+                }
+                if (!HasValidLivePlayerForSave(mpRunning && MultiplayerBridge.IsDedicatedServer()))
                 {
                     SetMessage(I18n.T("msg.save_exit_unavailable"));
                     return;
                 }
-
-                if (MultiplayerBridge.IsMultiplayerRunning())
+                if (!GameSaveBridge.CanSnapshotCurrentLayer())
                 {
-                    if (!MultiplayerBridge.IsServer())
-                    {
-                        SetMessage(I18n.T("mp.client_cannot_save"));
-                        return;
-                    }
+                    SetMessage(I18n.T("msg.save_layer_transition"));
+                    return;
+                }
+
+                if (mpRunning)
+                {
                     if (!MultiplayerBridge.TrySaveMpGame())
                     {
                         SetMessage(I18n.T("msg.save_exit_unavailable"));
@@ -263,6 +318,30 @@ namespace CasualtiesUnknown.SaveManager
                     _window.ClosePanel();
                     PlayerCamera.main.ToMainMenu();
                     SetMessage(I18n.T("msg.save_exit_mp_done"));
+                    return;
+                }
+
+                // 单机处于层底时转发原生 WorldGeneration.SaveAndExit，完整触发层底结算与 QoL BypassDepthFix。
+                if (SaveStore.IsPlayerAtLayerBoundary())
+                {
+                    _window.ClosePanel();
+                    _inPanelSaveExit = true;
+                    _panelSaveExitBuiltSlot = false;
+                    try
+                    {
+                        WorldGeneration.world.SaveAndExit();
+                        if (!_panelSaveExitBuiltSlot && SaveStore.CurrentSaveExists())
+                        {
+                            _store.SaveManual(I18n.T("lbl.save_exit_alias"));
+                        }
+                    }
+                    finally
+                    {
+                        _inPanelSaveExit = false;
+                        _panelSaveExitBuiltSlot = false;
+                        _store.ClearBeforeSaveAndExit();
+                    }
+                    SetMessage(I18n.T("msg.save_exit_done"));
                     return;
                 }
 
@@ -286,7 +365,20 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        /// <summary>游戏自带"保存并退出"写完 save.sv 后的补建槽位入口（Harmony Postfix 调用）。</summary>
+        /// <summary>原生 WorldGeneration.SaveAndExit 执行前抓拍实时种子与上下文，防止 ToMainMenu 先一步清零。</summary>
+        internal static void OnBeforeGameSaveAndExit()
+        {
+            try { _instance?._store?.CaptureBeforeSaveAndExit(); }
+            catch (Exception ex) { ModLog.Warning($"保存并退出前预抓拍失败：{ex.Message}"); }
+        }
+
+        /// <summary>清除 SaveAndExit 前置抓拍缓存（在被上游补丁拦截或异常中断时防止脏标志残留）。</summary>
+        internal static void ClearBeforeGameSaveAndExit()
+        {
+            _instance?._store?.ClearBeforeSaveAndExit();
+        }
+
+        /// <summary>原生 WorldGeneration.SaveAndExit 完成后补建存档槽位。</summary>
         internal static void OnGameSaveAndExit()
         {
             _instance?.SaveSlotForGameSaveExit();
@@ -294,6 +386,8 @@ namespace CasualtiesUnknown.SaveManager
 
         private void SaveSlotForGameSaveExit()
         {
+            if (_inGameSaveExitHook) return;
+            _inGameSaveExitHook = true;
             try
             {
                 if (MultiplayerBridge.IsMultiplayerRunning() && !MultiplayerBridge.IsServer())
@@ -308,11 +402,23 @@ namespace CasualtiesUnknown.SaveManager
                 }
                 string path = _store.SaveManual(I18n.T("lbl.save_exit_alias"));
                 ModLog.Flow("UI", "32", "游戏保存并退出：已补建槽位 " + path);
-                SetMessage(I18n.F("fmt.saved_to", System.IO.Path.GetFileName(path), SaveStore.CurrentSaveDisplayPath));
+                if (_inPanelSaveExit)
+                {
+                    _panelSaveExitBuiltSlot = true;
+                }
+                else
+                {
+                    SetMessage(I18n.F("fmt.saved_to", Path.GetFileName(path), SaveStore.CurrentSaveDisplayPath));
+                }
             }
             catch (Exception ex)
             {
                 ModLog.Warning($"游戏保存并退出建槽失败：{ex.Message}");
+            }
+            finally
+            {
+                _inGameSaveExitHook = false;
+                _store.ClearBeforeSaveAndExit();
             }
         }
 
@@ -323,6 +429,7 @@ namespace CasualtiesUnknown.SaveManager
                 ModLog.Flow("UI", "01", "切换槽位 " + slot.FullSlotPath + " sidecar=" + slot.Sidecar.Describe()
                     + " mpRunning=" + MultiplayerBridge.IsMultiplayerRunning());
                 _store.RestoreSlotToSave(slot.FullSlotPath, _cfg.BackupBeforeOverwrite.Value);
+                _window?.InvalidateSlotCache();
                 ModLog.Flow("UI", "02", "切换槽位完成 " + slot.File.Name);
                 SetMessage(I18n.F("fmt.restored_to", slot.File.Name));
             }
@@ -338,6 +445,7 @@ namespace CasualtiesUnknown.SaveManager
             try
             {
                 _store.DeleteSlot(slot.FullSlotPath);
+                _window?.InvalidateSlotCache();
                 SetMessage(I18n.F("fmt.deleted", slot.File.Name));
             }
             catch (Exception ex)
@@ -368,8 +476,6 @@ namespace CasualtiesUnknown.SaveManager
             float interval = Mathf.Max(0.5f, _cfg.AutoBackupIntervalMinutes.Value) * 60f;
             _nextAutoBackupAt = Time.unscaledTime + interval;
         }
-
-        // —— 阻穿透 —— //
 
         private void OnPanelOpened()
         {

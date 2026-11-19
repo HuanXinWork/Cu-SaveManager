@@ -1,25 +1,63 @@
 using System;
+using System.IO;
 using CasualtiesUnknown.SaveManager.Interop;
 using UnityEngine;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// QoL.Unknown 的软依赖桥。目标程序集成员名只出现在 <see cref="QolProvider"/> 里；
-    /// 保存槽位时抓取 QoL 的 SeedManager 状态，回档时把存档里的玩家位置 + 种子推回 QoL，
-    /// 让它在下一次 TryLoadGame postfix 还原。QoL 不在场时所有方法静默返回默认值，绝不影响主流程。
-    /// </summary>
+    /// <summary>封装对 QoL.Unknown 种子管理、自动存档状态与读档坐标恢复的软依赖访问。</summary>
     internal static class QolBridge
     {
         private static QolProvider Provider => InteropBootstrap.Qol;
 
-        /// <summary>是否检测到 QoL.Unknown（其世界确定化 / 自动存档能力可用）。</summary>
-        internal static bool IsQolPresent()
+        internal static bool IsQolPresent() => Provider.IsPresent;
+
+        /// <summary>QoL 是否正在执行后台自动存档。</summary>
+        internal static bool IsAutosaveInProgress() => Provider.IsAutosaveInProgress;
+
+        /// <summary>获取当前单机存档完整路径；QoL 文件名越界或为空时回退 VanillaSavePath。</summary>
+        internal static string GetCurrentSaveFilePath()
         {
-            return Provider.IsPresent;
+            try
+            {
+                string root = Application.persistentDataPath;
+                if (string.IsNullOrEmpty(root)) return MpSaveLocator.VanillaSavePath;
+                string file = Provider.CurrentSaveFile;
+                if (string.IsNullOrWhiteSpace(file)) return MpSaveLocator.VanillaSavePath;
+                string fullRoot = Path.GetFullPath(root)
+                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                    + Path.DirectorySeparatorChar;
+                string candidate = Path.GetFullPath(Path.Combine(root, file));
+                if (!candidate.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase))
+                    return MpSaveLocator.VanillaSavePath;
+                return candidate;
+            }
+            catch
+            {
+                return MpSaveLocator.VanillaSavePath;
+            }
         }
 
-        /// <summary>暂时禁用 QoL 对世界生成与存档的介入：置 SeedManager.IsSeeded=false + SaveManager.AutosaveEnabled=false。</summary>
+        /// <summary>单机槽位还原写入原版 save.sv 后，将 QoL 活动存档名切回 "save.sv"，防止读档时被旧重定向文件覆盖。</summary>
+        internal static void ResetCurrentSaveFileToVanilla()
+        {
+            try
+            {
+                if (!Provider.IsPresent) return;
+                string current = Provider.CurrentSaveFile;
+                if (!string.Equals(current, "save.sv", StringComparison.OrdinalIgnoreCase)
+                    && Provider.TryWriteCurrentSaveFile("save.sv"))
+                {
+                    ModLog.Info($"QoL 活动存档已从 '{current}' 切回 'save.sv'");
+                }
+            }
+            catch (Exception ex)
+            {
+                ModLog.Warning($"QolBridge.ResetCurrentSaveFileToVanilla 失败：{ex.Message}");
+            }
+        }
+
+        /// <summary>关闭 QoL 的固定种子与后台自动存档介入。</summary>
         internal static void DisableQolIntervention()
         {
             try
@@ -34,8 +72,7 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        /// <summary>QoL 模式新开局确保 QoL 有确定种子：未 seeded 时用自生成种子让 QoL 固定世界，并恢复其自动存档。
-        /// 已 seeded（玩家在 QoL 输过种子）则不覆盖。让回档可凭 sidecar 种子复现世界。</summary>
+        /// <summary>QoL 模式新开局时确保拥有非零确定种子并开启自动存档；已有种子时不覆盖。</summary>
         internal static void EnsureQolSeeded()
         {
             if (!Provider.IsPresent)
@@ -65,37 +102,35 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        /// <summary>读 QoL.SeedManager 当前实时种子；为 0 时回落到本 mod sidecar 已记录的稳定种子。</summary>
+        /// <summary>读取 QoL 实时种子；为 0 时按当前模式回退读取同模式存档的 sidecar 种子。</summary>
         internal static void ReadCurrentSeed(out int seed, out string input)
         {
             Provider.TryReadSeed(out bool _, out seed, out input);
-            if (seed != 0)
-            {
-                return;
-            }
+            if (seed != 0) return;
 
             try
             {
-                var sc = SlotSidecar.LoadOrEmpty(SaveStore.GameSavePath);
+                string savePath = MultiplayerBridge.IsMultiplayerRunning()
+                    ? MpSaveLocator.ResolveOwnSavePath()
+                    : GetCurrentSaveFilePath();
+                if (string.IsNullOrEmpty(savePath)) return;
+                var sc = SlotSidecar.LoadOrEmpty(savePath);
                 if (sc != null && sc.QolSeed != 0)
                 {
                     seed = sc.QolSeed;
                     input = string.IsNullOrEmpty(input) ? (sc.QolSeedInput ?? "") : input;
                 }
             }
-            catch
-            {
-                // 读取 sidecar 失败时保持 QoL 的实时值，不影响调用方。
-            }
+            catch { }
         }
 
-        /// <summary>FNV-1a 32 位 hash 当前 save.sv 字节流，与 QoL SeedManager.GetDeterministicSeedFromSaveFile 一致。</summary>
+        /// <summary>按存档字节计算 32 位 FNV-1a 非零确定性种子。</summary>
         internal static int ComputeDeterministicSeedFromSaveFile(string fullPath)
         {
             try
             {
-                if (!System.IO.File.Exists(fullPath)) return 0;
-                byte[] bytes = System.IO.File.ReadAllBytes(fullPath);
+                if (string.IsNullOrEmpty(fullPath) || !File.Exists(fullPath)) return 0;
+                byte[] bytes = File.ReadAllBytes(fullPath);
                 if (bytes == null || bytes.Length == 0) return 0;
                 uint h = 2166136261u;
                 for (int i = 0; i < bytes.Length; i++)
@@ -106,15 +141,18 @@ namespace CasualtiesUnknown.SaveManager
                 int v = (int)h;
                 return v == 0 ? 1 : v;
             }
-            catch { return 0; }
+            catch
+            {
+                return 0;
+            }
         }
 
-        /// <summary>Debug 构建下说明当前种子取自哪里（QoL 实时 / sidecar 回落 / 存档文件 FNV / 无）；Release 中调用点被整体移除。</summary>
+        /// <summary>返回当前种子的来源诊断描述。</summary>
         internal static string DescribeSeedSource()
         {
             if (!Provider.IsPresent)
             {
-                return "QoL 未解析到，无种子来源（世界按原随机状态生成）";
+                return "QoL 未解析到，无种子来源";
             }
 
             Provider.TryReadSeed(out bool seeded, out int seed, out string input);
@@ -123,19 +161,27 @@ namespace CasualtiesUnknown.SaveManager
                 return "QoL 当前种子（seeded=true seed=" + seed + " input='" + input + "'）";
             }
 
-            SlotSidecar sidecar = SlotSidecar.LoadOrEmpty(SaveStore.GameSavePath);
-            if (sidecar.QolSeed != 0 || !string.IsNullOrEmpty(sidecar.QolSeedInput))
+            string savePath = MultiplayerBridge.IsMultiplayerRunning()
+                ? MpSaveLocator.ResolveOwnSavePath()
+                : GetCurrentSaveFilePath();
+            if (!string.IsNullOrEmpty(savePath))
             {
-                return "sidecar（QoL 未 seeded 或种子为 0，seed=" + sidecar.QolSeed + " input='" + sidecar.QolSeedInput + "'）";
-            }
+                SlotSidecar sidecar = SlotSidecar.LoadOrEmpty(savePath);
+                if (sidecar.QolSeed != 0 || !string.IsNullOrEmpty(sidecar.QolSeedInput))
+                {
+                    return "sidecar（seed=" + sidecar.QolSeed + " input='" + sidecar.QolSeedInput + "'）";
+                }
 
-            int fnv = ComputeDeterministicSeedFromSaveFile(SaveStore.GameSavePath);
-            return fnv != 0
-                ? "存档文件 FNV（QoL 无种子且 sidecar 未记录，save.sv 字节 FNV-1a seed=" + fnv + "）"
-                : "无（QoL 无种子、sidecar 未记录、save.sv 不可读；世界不可复现）";
+                int fnv = ComputeDeterministicSeedFromSaveFile(savePath);
+                if (fnv != 0)
+                {
+                    return "存档文件 FNV（seed=" + fnv + "）";
+                }
+            }
+            return "无（QoL 无种子、sidecar 未记录、存档不可读）";
         }
 
-        /// <summary>把种子钉进 QoL：CurrentSeed/InputString + IsSeeded=true。QoL 不在场或 seed=0 时静默跳过。</summary>
+        /// <summary>将非零种子写入 QoL SeedManager 并置 IsSeeded=true。</summary>
         internal static void PinSeed(int seed, string input)
         {
             if (!Provider.IsPresent || seed == 0)
@@ -154,7 +200,7 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        /// <summary>把回档目标的玩家位置 + 种子推给 QoL。回档完成后 QoL 的 TryLoadGame postfix 自动塞回 body.transform.position。</summary>
+        /// <summary>将回档目标坐标与种子写入 QoL；无坐标时显式清空 PendingLoadPosition。</summary>
         internal static void PrepareRollback(SlotSidecar sidecar)
         {
             if (sidecar == null) return;
@@ -167,6 +213,11 @@ namespace CasualtiesUnknown.SaveManager
                     Provider.TryWritePendingLoadPosition(new Vector3(sidecar.PlayerX, sidecar.PlayerY, 0f));
                     ModLog.Flow("QoL", "12", "PendingLoadPosition=(" + sidecar.PlayerX.ToString("0.0") + "," + sidecar.PlayerY.ToString("0.0") + ")");
                 }
+                else
+                {
+                    ClearPendingLoadPosition();
+                    ModLog.Flow("QoL", "12", "PendingLoadPosition=null");
+                }
 
                 if (sidecar.QolSeed != 0 || !string.IsNullOrEmpty(sidecar.QolSeedInput))
                 {
@@ -177,6 +228,14 @@ namespace CasualtiesUnknown.SaveManager
             catch (Exception ex)
             {
                 ModLog.Warning($"QolBridge.PrepareRollback 失败：{ex.Message}");
+            }
+        }
+
+        internal static void ClearPendingLoadPosition()
+        {
+            if (((IInteropTypeRegistry)Provider).TryResolveType("QoL_Unknown.SaveSystemPatcher", out Type patcherType))
+            {
+                ((IInteropMemberAccess)Provider).TryWriteStatic(patcherType, "PendingLoadPosition", null);
             }
         }
     }

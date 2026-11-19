@@ -3,7 +3,7 @@ using HarmonyLib;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>读档/回档时把 runSettings["startingsupplies"] 视作 0，避免游戏 WorldPlacePlayer 在第 1 层重发起始物资。</summary>
+    /// <summary>读档/回档启用时将 <c>startingsupplies</c> 运行参数视作 0，防止第 1 层重新发放起始物资。</summary>
     [HarmonyPatch]
     internal static class StartingSuppliesOnLoadGuardPatch
     {

@@ -9,19 +9,8 @@ using UnityEngine;
 
 namespace CasualtiesUnknown.SaveManager.Interop
 {
-    /// <summary>QoL.Unknown 的提供方适配器，全程通过反射访问目标程序集。</summary>
-    /// <remarks>
-    /// 目标程序集：程序集简单名含 "qol"（忽略大小写）的插件程序集；本次对接 QoL.Unknown。
-    /// 依赖的目标成员：
-    /// QoL_Unknown.SeedManager.IsSeeded（静态字段，bool）、
-    /// QoL_Unknown.SeedManager.CurrentSeed（静态字段，int）、
-    /// QoL_Unknown.SeedManager.InputString（静态字段，string）、
-    /// QoL_Unknown.SaveManager.AutosaveEnabled（静态字段，bool）、
-    /// QoL_Unknown.SaveSystemPatcher.PendingLoadPosition（静态字段，System.Nullable&lt;UnityEngine.Vector3&gt;）。
-    /// QoL_Unknown.SaveSystemPatcher 与 QoL_Unknown.SeedManager 是 public 类型，QoL_Unknown.MultiplayerCompat 是 internal 类型；
-    /// 后者及其它 internal 类型的成员在编译期不可见，本适配器不依赖它们，但类型解析一律走运行期反射，与可见性无关。
-    /// 目标程序集尚未加载时不计为不可用缓存，下次访问重试；成员缺失项只在首次解析后警告一次。
-    /// </remarks>
+    /// <summary>QoL.Unknown 反射提供方，对接世界种子、自动存档状态与读档坐标恢复字段。</summary>
+    /// <remarks>匹配简单名含 "qol" 的插件程序集（QoL_Unknown.SeedManager / SaveManager / SaveSystemPatcher）。</remarks>
     internal sealed class QolProvider : IInteropProvider, IInteropMemberAccess, IInteropTypeRegistry, IInteropWorldGenHook
     {
         private const string TargetAssemblyNamePart = "qol";
@@ -32,8 +21,7 @@ namespace CasualtiesUnknown.SaveManager.Interop
 
         private readonly object _sync = new object();
 
-        // 标志在锁内写、锁外读（EnsureResolved 的双检锁），必须带 volatile：
-        // 锁外读取只做 acquire，否则看到 _resolved 为 true 时其余成员字段仍可能不可见。
+        // 双检锁标志：锁外读取需 acquire 语义以确保已解析成员字段可见。
         private volatile bool _resolved;
         private volatile bool _available;
 
@@ -47,6 +35,8 @@ namespace CasualtiesUnknown.SaveManager.Interop
         private FieldInfo _seedInputString;
         private FieldInfo _autosaveEnabled;
         private FieldInfo _pendingLoadPosition;
+        private FieldInfo _isAutosaveOperation;
+        private FieldInfo _currentSaveFile;
 
         /// <inheritdoc/>
         string IInteropProvider.Name => "QoL";
@@ -62,7 +52,7 @@ namespace CasualtiesUnknown.SaveManager.Interop
         /// <inheritdoc/>
         int IInteropProvider.Priority => 10;
 
-        /// <summary>目标插件是否在场且可访问。</summary>
+        /// <summary>目标插件是否在场且核心能力字段可访问。</summary>
         internal bool IsPresent => EnsureResolved();
 
         /// <summary>目标插件程序集；尚未加载时为 null。</summary>
@@ -75,14 +65,45 @@ namespace CasualtiesUnknown.SaveManager.Interop
             }
         }
 
-        /// <summary>读取 QoL.Unknown 的种子状态；字段缺失时对应输出为默认值。</summary>
-        /// <remarks>链路：QoL_Unknown.SeedManager.IsSeeded / CurrentSeed / InputString。</remarks>
+        /// <summary>QoL 后台自动存档是否正在执行（QoL_Unknown.SaveSystemPatcher.IsAutosaveOperation）。</summary>
+        internal bool IsAutosaveInProgress
+        {
+            get
+            {
+                EnsureResolved();
+                return InteropReflection.ReadMember(_isAutosaveOperation, null) is bool flag && flag;
+            }
+        }
+
+        /// <summary>QoL 当前活动存档文件名（QoL_Unknown.SaveManager.CurrentSaveFile）；不可用时返回 "save.sv"。</summary>
+        internal string CurrentSaveFile
+        {
+            get
+            {
+                EnsureResolved();
+                string file = InteropReflection.ReadMember(_currentSaveFile, null) as string;
+                return !string.IsNullOrEmpty(file) ? file : "save.sv";
+            }
+        }
+
+        /// <summary>覆写 QoL 当前活动存档文件名（QoL_Unknown.SaveManager.CurrentSaveFile）。</summary>
+        internal bool TryWriteCurrentSaveFile(string fileName)
+        {
+            if (!EnsureResolved() || _currentSaveFile == null || string.IsNullOrWhiteSpace(fileName))
+            {
+                return false;
+            }
+
+            return InteropReflection.TryWriteMember(_currentSaveFile, null, fileName);
+        }
+
+        /// <summary>读取 QoL 种子状态（QoL_Unknown.SeedManager.IsSeeded / CurrentSeed / InputString）。</summary>
         internal bool TryReadSeed(out bool seeded, out int currentSeed, out string inputString)
         {
             seeded = false;
             currentSeed = 0;
             inputString = string.Empty;
-            if (!EnsureResolved())
+            if (!EnsureResolved() || _seedCurrentSeed == null || _seedIsSeeded == null)
             {
                 return false;
             }
@@ -93,14 +114,13 @@ namespace CasualtiesUnknown.SaveManager.Interop
             seeded = seededValue is bool flag && flag;
             currentSeed = currentValue is int seed ? seed : 0;
             inputString = inputValue as string ?? string.Empty;
-            return _seedCurrentSeed != null;
+            return true;
         }
 
-        /// <summary>把种子状态写回 QoL.Unknown；三个字段按给定值整体覆盖。</summary>
-        /// <remarks>链路：QoL_Unknown.SeedManager.CurrentSeed / InputString / IsSeeded。</remarks>
+        /// <summary>覆写 QoL 种子状态（QoL_Unknown.SeedManager.CurrentSeed / InputString / IsSeeded）。</summary>
         internal bool TryWriteSeed(bool seeded, int currentSeed, string inputString)
         {
-            if (!EnsureResolved() || _seedCurrentSeed == null)
+            if (!EnsureResolved() || _seedCurrentSeed == null || _seedIsSeeded == null)
             {
                 return false;
             }
@@ -111,31 +131,25 @@ namespace CasualtiesUnknown.SaveManager.Interop
                 written &= InteropReflection.TryWriteMember(_seedInputString, null, inputString ?? string.Empty);
             }
 
-            if (_seedIsSeeded != null)
-            {
-                written &= InteropReflection.TryWriteMember(_seedIsSeeded, null, seeded);
-            }
-
+            written &= InteropReflection.TryWriteMember(_seedIsSeeded, null, seeded);
             return written;
         }
 
-        /// <summary>读取 QoL.Unknown 的自动存档开关。</summary>
-        /// <remarks>链路：QoL_Unknown.SaveManager.AutosaveEnabled。</remarks>
+        /// <summary>读取 QoL 自动存档开关（QoL_Unknown.SaveManager.AutosaveEnabled）。</summary>
         internal bool TryReadAutosaveEnabled(out bool enabled)
         {
             enabled = false;
-            if (!EnsureResolved())
+            if (!EnsureResolved() || _autosaveEnabled == null)
             {
                 return false;
             }
 
             object value = InteropReflection.ReadMember(_autosaveEnabled, null);
             enabled = value is bool flag && flag;
-            return _autosaveEnabled != null;
+            return true;
         }
 
-        /// <summary>写入 QoL.Unknown 的自动存档开关。</summary>
-        /// <remarks>链路：QoL_Unknown.SaveManager.AutosaveEnabled。</remarks>
+        /// <summary>写入 QoL 自动存档开关（QoL_Unknown.SaveManager.AutosaveEnabled）。</summary>
         internal bool TryWriteAutosaveEnabled(bool enabled)
         {
             if (!EnsureResolved() || _autosaveEnabled == null)
@@ -146,11 +160,7 @@ namespace CasualtiesUnknown.SaveManager.Interop
             return InteropReflection.TryWriteMember(_autosaveEnabled, null, enabled);
         }
 
-        /// <summary>写入读档后要还原的玩家坐标。</summary>
-        /// <remarks>
-        /// 链路：QoL_Unknown.SaveSystemPatcher.PendingLoadPosition（System.Nullable&lt;UnityEngine.Vector3&gt;）。
-        /// 目标字段由 QoL 在 TryLoadGame 的 postfix 读取并写回玩家身体，本方法只负责把值放进去。
-        /// </remarks>
+        /// <summary>写入 QoL 读档待还原坐标（QoL_Unknown.SaveSystemPatcher.PendingLoadPosition）。</summary>
         internal bool TryWritePendingLoadPosition(Vector3 position)
         {
             if (!EnsureResolved() || _pendingLoadPosition == null)
@@ -162,7 +172,7 @@ namespace CasualtiesUnknown.SaveManager.Interop
             return InteropReflection.TryWriteMember(_pendingLoadPosition, null, nullable);
         }
 
-        /// <summary>一行摘要，列出各依赖成员的解析结果，用于启动日志与版本变动时的排查。</summary>
+        /// <summary>返回各依赖成员的解析状态摘要。</summary>
         internal string DescribeResolvedMembers()
         {
             EnsureResolved();
@@ -171,10 +181,12 @@ namespace CasualtiesUnknown.SaveManager.Interop
                 + " QoL_Unknown.SeedManager.CurrentSeed=" + State(_seedCurrentSeed)
                 + " QoL_Unknown.SeedManager.InputString=" + State(_seedInputString)
                 + " QoL_Unknown.SaveManager.AutosaveEnabled=" + State(_autosaveEnabled)
-                + " QoL_Unknown.SaveSystemPatcher.PendingLoadPosition=" + State(_pendingLoadPosition);
+                + " QoL_Unknown.SaveManager.CurrentSaveFile=" + State(_currentSaveFile)
+                + " QoL_Unknown.SaveSystemPatcher.PendingLoadPosition=" + State(_pendingLoadPosition)
+                + " QoL_Unknown.SaveSystemPatcher.IsAutosaveOperation=" + State(_isAutosaveOperation);
         }
 
-        /// <remarks>只查目标程序集，不扫描 AppDomain。</remarks>
+        /// <inheritdoc/>
         bool IInteropTypeRegistry.TryResolveType(string fullName, out Type type)
         {
             return TryResolveType(fullName, out type);
@@ -194,54 +206,35 @@ namespace CasualtiesUnknown.SaveManager.Interop
             return type != null;
         }
 
-        /// <remarks>与目标程序集无关的通用实现：成员按名称在传入的类型上解析。</remarks>
+        /// <inheritdoc/>
         bool IInteropMemberAccess.TryReadStatic(Type type, string member, out object value)
         {
             value = null;
-            MemberInfo target = FindStaticMember(type, member);
-            if (target == null)
-            {
-                return false;
-            }
-
-            value = InteropReflection.ReadMember(target, null);
-            return value != null;
+            return InteropReflection.TryReadMember(FindMember(type, member, true), null, out value);
         }
 
-        /// <remarks>字段与可写属性都支持；目标成员缺失或写入抛异常时返回 false。</remarks>
+        /// <inheritdoc/>
         bool IInteropMemberAccess.TryWriteStatic(Type type, string member, object value)
         {
-            MemberInfo target = FindStaticMember(type, member);
-            if (target == null)
-            {
-                return false;
-            }
-
-            return InteropReflection.TryWriteMember(target, null, value);
+            return InteropReflection.TryWriteMember(FindMember(type, member, true), null, value);
         }
 
-        /// <remarks>与目标程序集无关的通用实现：成员按名称在传入对象的类型上解析。</remarks>
+        /// <inheritdoc/>
         bool IInteropMemberAccess.TryReadInstance(object target, string member, out object value)
         {
             value = null;
-            MemberInfo info = target == null ? null : FindInstanceMember(target.GetType(), member);
-            if (info == null)
-            {
-                return false;
-            }
-
-            value = InteropReflection.ReadMember(info, target);
-            return value != null;
+            return target != null
+                && InteropReflection.TryReadMember(FindMember(target.GetType(), member, false), target, out value);
         }
 
-        /// <remarks>字段与可写属性都支持；目标成员缺失或写入抛异常时返回 false。</remarks>
+        /// <inheritdoc/>
         bool IInteropMemberAccess.TryWriteInstance(object target, string member, object value)
         {
-            MemberInfo info = target == null ? null : FindInstanceMember(target.GetType(), member);
-            return info != null && InteropReflection.TryWriteMember(info, target, value);
+            return target != null
+                && InteropReflection.TryWriteMember(FindMember(target.GetType(), member, false), target, value);
         }
 
-        /// <remarks>重载按实参类型匹配（可赋值判定），不再用「名称 + 形参个数」；out 形参的读回值留在传入的 args 数组里。</remarks>
+        /// <inheritdoc/>
         bool IInteropMemberAccess.TryInvokeStatic(Type type, string method, out object result, params object[] args)
         {
             object[] arguments = args ?? Array.Empty<object>();
@@ -249,7 +242,7 @@ namespace CasualtiesUnknown.SaveManager.Interop
             return InteropReflection.TryInvoke(InteropReflection.FindMethodByArgs(type, method, true, arguments), null, arguments, out result);
         }
 
-        /// <remarks>重载按实参类型匹配（可赋值判定），不再用「名称 + 形参个数」；out 形参的读回值留在传入的 args 数组里。</remarks>
+        /// <inheritdoc/>
         bool IInteropMemberAccess.TryInvokeInstance(object target, string method, out object result, params object[] args)
         {
             result = null;
@@ -262,7 +255,7 @@ namespace CasualtiesUnknown.SaveManager.Interop
             return InteropReflection.TryInvoke(InteropReflection.FindMethodByArgs(target.GetType(), method, false, arguments), target, arguments, out result);
         }
 
-        /// <remarks>种子取自 QoL_Unknown.SeedManager.CurrentSeed；当前种子为 0 视为未设置。</remarks>
+        /// <inheritdoc/>
         bool IInteropWorldGenHook.TryGetSeed(out int seed)
         {
             seed = 0;
@@ -275,44 +268,38 @@ namespace CasualtiesUnknown.SaveManager.Interop
             return seeded && current != 0;
         }
 
-        /// <remarks>目标插件未提供世界生成阶段的可观察状态，固定为 false。</remarks>
+        /// <inheritdoc/>
         bool IInteropWorldGenHook.IsGenerating => false;
 
-        /// <remarks>目标插件未提供世界生成阶段的事件源，固定返回 false。</remarks>
+        /// <inheritdoc/>
         bool IInteropWorldGenHook.TrySubscribeGeneration(Action<bool> handler) => false;
 
-        /// <summary>按名解析静态字段或静态属性；都没有时返回 null。</summary>
-        private static MemberInfo FindStaticMember(Type type, string member)
+        private static MemberInfo FindMember(Type type, string name, bool staticOnly)
         {
-            if (type == null || string.IsNullOrEmpty(member))
+            if (type == null || string.IsNullOrEmpty(name))
             {
                 return null;
             }
 
-            MemberInfo field = InteropReflection.FindField(type, member);
-            return field ?? InteropReflection.FindProperty(type, member);
-        }
+            FieldInfo field = InteropReflection.FindField(type, name);
+            if (field != null && field.IsStatic == staticOnly)
+            {
+                return field;
+            }
 
-        /// <summary>按名解析实例字段或实例属性；都没有时返回 null。</summary>
-        private static MemberInfo FindInstanceMember(Type type, string member)
-        {
-            if (type == null || string.IsNullOrEmpty(member))
+            PropertyInfo property = InteropReflection.FindProperty(type, name);
+            if (property == null)
             {
                 return null;
             }
 
-            MemberInfo field = InteropReflection.FindField(type, member);
-            return field ?? InteropReflection.FindProperty(type, member);
+            MethodInfo accessor = property.GetGetMethod(true) ?? property.GetSetMethod(true);
+            return accessor != null && accessor.IsStatic == staticOnly ? property : null;
         }
 
-        /// <summary>把成员解析结果格式化为 ok / missing。</summary>
-        private static string State(object member)
-        {
-            return member == null ? "missing" : "ok";
-        }
+        private static string State(object member) => member == null ? "missing" : "ok";
 
-        /// <summary>首次访问时解析目标程序集及全部依赖成员并缓存；目标程序集尚未加载时不置缓存，下次访问重试。</summary>
-        /// <remarks>目标程序集不存在属于可选场景，不计失败也不记警告；成员解析失败后缓存并只警告一次。</remarks>
+        /// <summary>首次访问时解析目标程序集及依赖成员并缓存；程序集尚未加载时不缓存以便后续重试。</summary>
         private bool EnsureResolved()
         {
             if (_resolved)
@@ -340,36 +327,43 @@ namespace CasualtiesUnknown.SaveManager.Interop
                     InteropDiagnostics.WarnOnce("QolProvider", "目标程序集成员缺失：" + string.Join(", ", missing));
                 }
 
-                // 标志最后发布：锁外的读者看到 _resolved 为 true 时，此前写入的成员字段均已可见。
                 _resolved = true;
             }
 
             return _available;
         }
 
-        /// <summary>丢弃已缓存的解析结果并重新解析，用于目标插件晚加载或成员变化后的显式重试。</summary>
+        /// <summary>清空缓存并重新解析目标程序集成员。</summary>
         internal bool TryRefresh()
         {
-            ModLog.Debug("QoL：TryRefresh 被调用，丢弃已缓存的解析结果并重新解析");
+            ModLog.Debug("QoL：TryRefresh 清空缓存并重新解析");
             lock (_sync)
             {
                 _resolved = false;
                 _available = false;
+                _assembly = null;
+                _seedManagerType = null;
+                _saveManagerType = null;
+                _saveSystemPatcherType = null;
+                _seedIsSeeded = null;
+                _seedCurrentSeed = null;
+                _seedInputString = null;
+                _autosaveEnabled = null;
+                _pendingLoadPosition = null;
+                _isAutosaveOperation = null;
+                _currentSaveFile = null;
             }
 
             return EnsureResolved();
         }
 
-        /// <summary>解析目标程序集的全部依赖成员，并把缺失项写进 <paramref name="missing"/>。</summary>
-        /// <remarks>在场判定与旧桥一致：SaveSystemPatcher 或 SeedManager 任一解析到即视为在场；成员缺失只关闭对应能力。</remarks>
         private bool Resolve(Assembly assembly, List<string> missing)
         {
             _assembly = assembly;
             _seedManagerType = InteropReflection.FindType(_assembly, SeedManagerTypeName);
             _saveManagerType = InteropReflection.FindType(_assembly, SaveManagerTypeName);
             _saveSystemPatcherType = InteropReflection.FindType(_assembly, SaveSystemPatcherTypeName);
-            bool present = _seedManagerType != null || _saveSystemPatcherType != null;
-            if (!present)
+            if (_seedManagerType == null && _saveSystemPatcherType == null)
             {
                 missing.Add(SeedManagerTypeName + " 与 " + SaveSystemPatcherTypeName);
                 ModLog.Debug("QoL：assembly='" + assembly.GetName().Name + "' available=false capabilities=[] missing=[" + string.Join(", ", missing) + "]");
@@ -381,20 +375,24 @@ namespace CasualtiesUnknown.SaveManager.Interop
             _seedInputString = Require(_seedManagerType, "InputString", missing);
             _autosaveEnabled = Require(_saveManagerType, "AutosaveEnabled", missing);
             _pendingLoadPosition = Require(_saveSystemPatcherType, "PendingLoadPosition", missing);
-            // 历史上出现过 QoL 程序集已加载但成员全部解析不到的情况，这里逐成员列出结果以便直接定位。
-            ModLog.Debug("QoL：assembly='" + assembly.GetName().Name + "' available=true capabilities=["
-                + InteropDiagnostics.FormatCapabilities(InteropCapability.MemberAccess | InteropCapability.WorldGenHook) + "]"
-                + " 已解析 " + CountResolved(_seedIsSeeded, _seedCurrentSeed, _seedInputString, _autosaveEnabled, _pendingLoadPosition) + " 个成员"
+            _isAutosaveOperation = _saveSystemPatcherType == null ? null : InteropReflection.FindField(_saveSystemPatcherType, "IsAutosaveOperation");
+            _currentSaveFile = _saveManagerType == null ? null : InteropReflection.FindField(_saveManagerType, "CurrentSaveFile");
+
+            bool available = _seedCurrentSeed != null || _pendingLoadPosition != null;
+            ModLog.Debug("QoL：assembly='" + assembly.GetName().Name + "' available=" + available + " capabilities=["
+                + (available ? InteropDiagnostics.FormatCapabilities(InteropCapability.MemberAccess | InteropCapability.WorldGenHook) : "") + "]"
+                + " 已解析 " + CountResolved(_seedIsSeeded, _seedCurrentSeed, _seedInputString, _autosaveEnabled, _pendingLoadPosition, _isAutosaveOperation, _currentSaveFile) + " 个成员"
                 + " SeedManager.IsSeeded=" + State(_seedIsSeeded)
                 + " SeedManager.CurrentSeed=" + State(_seedCurrentSeed)
                 + " SeedManager.InputString=" + State(_seedInputString)
                 + " SaveManager.AutosaveEnabled=" + State(_autosaveEnabled)
+                + " SaveManager.CurrentSaveFile=" + State(_currentSaveFile)
                 + " SaveSystemPatcher.PendingLoadPosition=" + State(_pendingLoadPosition)
+                + " SaveSystemPatcher.IsAutosaveOperation=" + State(_isAutosaveOperation)
                 + " missing=[" + string.Join(", ", missing) + "]");
-            return true;
+            return available;
         }
 
-        /// <summary>Debug 构建下统计已解析成员数；Release 中调用点被整体移除，不会分配数组。</summary>
         private static int CountResolved(params object[] members)
         {
             int resolved = 0;
@@ -409,29 +407,34 @@ namespace CasualtiesUnknown.SaveManager.Interop
             return resolved;
         }
 
-        /// <summary>在已加载程序集里按简单名匹配目标程序集；不加载新程序集。</summary>
         private static Assembly FindTargetAssembly()
         {
+            Assembly self = typeof(QolProvider).Assembly;
             Assembly[] assemblies = AppDomain.CurrentDomain.GetAssemblies();
             for (int i = 0; i < assemblies.Length; i++)
             {
-                string name = assemblies[i].GetName().Name;
+                Assembly candidate = assemblies[i];
+                if (candidate == null || ReferenceEquals(candidate, self))
+                {
+                    continue;
+                }
+
+                string name = candidate.GetName().Name;
                 if (!string.IsNullOrEmpty(name) && name.IndexOf(TargetAssemblyNamePart, StringComparison.OrdinalIgnoreCase) >= 0)
                 {
-                    return assemblies[i];
+                    return candidate;
                 }
             }
 
             return null;
         }
 
-        /// <summary>按名称取静态字段；类型或成员缺失时记录缺失项并返回 null。</summary>
         private static FieldInfo Require(Type type, string member, List<string> missing)
         {
             FieldInfo field = type == null ? null : InteropReflection.FindField(type, member);
             if (field == null)
             {
-                missing.Add((type == null ? "<type>" : type.Name + "." + member));
+                missing.Add(type == null ? "<type>." + member : type.Name + "." + member);
             }
 
             return field;
