@@ -26,7 +26,7 @@
 
 新增 `Together.ModHooks` / `TogetherPanelApi` 的可选对接：Together 提供这些接口时改走官方钩子，没有时（包括当前 Steam 版 5.5.3）沿用补丁路径。
 
-本版还包含一轮全量代码审查的其它修复，逐项说明见 [docs/README.md](docs/README.md)。
+本版还包含一轮全量代码审查的其它修复。
 
 ## 1.3.3
 

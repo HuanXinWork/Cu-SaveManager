@@ -1,13 +1,13 @@
-# CuSaveManager V1.3.2 for Casualties: Unknown
+# CuSaveManager V1.3.4 for Casualties: Unknown
 
 > 适配游戏《未知伤亡》的多存档、死亡回档与固定世界模组
-> 兼容：KrokMP 多人模式、QoL Unknown（缺少不影响基础功能）
+> 兼容：Casualties: Together 联机（5.5.x）、QoL Unknown（缺少不影响基础功能）
 
 English guide: see [README.en.md](README.en.md)
 
 ## 简介
 
-该模组在原版单一存档之上提供文件级多存档管理：把当前进度复制为独立槽位、定时自动备份、角色死亡后回档到最近一次备份，并支持固定世界生成（同一冒险回档后地形可复现）。检测到 QoL Unknown 或 KrokMP 时自动软联动，缺失以上mod时也不会影响mod的基础功能。
+该模组在原版单一存档之上提供文件级多存档管理：把当前进度复制为独立槽位、定时自动备份、角色死亡后回档到最近一次备份，并支持固定世界生成（同一冒险回档后地形可复现）。检测到 QoL Unknown 或 Casualties: Together 时自动软联动，缺失以上 mod 时也不会影响 mod 的基础功能。
 
 目前以测试单人模式下的，保存回档均正常
 多人测试主机测试正常。
@@ -23,6 +23,8 @@ English guide: see [README.en.md](README.en.md)
 把 `CuSaveManager` 文件夹放到 `BepInEx/plugins/` 下，内含：
 
 - `CuSaveManager.dll`
+
+首次启动会在 `BepInEx/plugins/CuSaveManagerLocales/` 生成默认语言包 `en.json`、`zh.json`；已存在的语言包不会被覆盖。
 
 启动游戏后，主菜单会注入「存档管理」按钮；游戏内可用快捷键或该按钮打开面板。
 
@@ -58,12 +60,30 @@ English guide: see [README.en.md](README.en.md)
 | 在游戏控制台显示模组日志 | 开启后模组日志同步打印到 ` 键控制台 |
 | 接受新版本更新提示 | 开启后启动时检查 GitHub 新版并在游戏内提示 |
 | 读档时不重发起始物资 | 修复游戏 bug：读档/回档到第 1 层时不再按 `startingsupplies` 重发应急灯或全套基础物资。关闭则保留游戏原版行为 |
-| 界面语言 | 自动 / 中文 / English 三档；自动按游戏 Locale 关键词识别 |
+| 界面语言 | 自动，或手动选择已加载的语言包；自动按游戏 Locale 识别中文 |
+
+### 语言包
+
+界面语言由 `BepInEx/plugins/CuSaveManagerLocales/` 下的 `*.json` 驱动：文件名（不含扩展名）即语言代码，例如 `en.json`、`zh.json`、`ja.json`。每个文件是一组 `key` / `value`：
+
+```json
+{
+  "entries": [
+    { "key": "lang.name", "value": "日本語" },
+    { "key": "app.name", "value": "セーブ管理" }
+  ]
+}
+```
+
+- `lang.name` 是语言选择器里显示的名称，缺省时显示语言代码。
+- 缺 key 时依次回落到当前语言、英文、原始 key。
+- 语言文件须为 UTF-8 编码；修改后重启游戏生效。
+- 删除语言包后选择器会自动移除该语言；目录为空时重新释放默认 `en.json`、`zh.json`。
 
 ## 软依赖说明
 
 - **QoL Unknown**：在场时可把固定世界交给它；选本 mod 引擎时本模组会暂时禁用其世界/存档介入。
-- **KrokMP**：在场时按多人存档（`mp_save`）管理，回档走主机两阶段重载。
+- **Casualties: Together**：在场时按多人存档（`mp_save`）管理，回档走主机两阶段重载；5.5.x 存档的 `PLRCHARS` 会随 `PLRPOS` 一并重映射。
 - 两者缺席或字段签名变化时，单机基础存档/回档不受影响，仅「位置恢复 / 种子恢复 / 多人广播 / 多人死亡判定」相应降级。
 
 ## 相关项目

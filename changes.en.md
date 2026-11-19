@@ -26,7 +26,7 @@ Mouse hover and drag are blocked while the save panel is open, so they no longer
 
 Added optional integration with `Together.ModHooks` / `TogetherPanelApi`: when Together provides them the official hooks are used; otherwise (including the current Steam build 5.5.3) the patch path is kept.
 
-This version also includes the remaining fixes from a full code review; see [docs/README.md](docs/README.md) (in Chinese) for the item-by-item list.
+This version also includes the remaining fixes from a full code review.
 
 ## 1.3.3
 
