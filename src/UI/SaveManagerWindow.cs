@@ -5,6 +5,7 @@ using System.IO;
 using BepInEx.Configuration;
 using UnityEngine;
 
+
 namespace CasualtiesUnknown.SaveManager
 {
     /// <summary>存档管理主窗口，负责设置、槽位管理、回档、关于及外部模组侧栏分页渲染。</summary>
@@ -1037,43 +1038,59 @@ namespace CasualtiesUnknown.SaveManager
             return result;
         }
 
+        private static List<KeyValuePair<string, string>> BuildLanguageOptions()
+        {
+            var list = new List<KeyValuePair<string, string>>();
+            list.Add(new KeyValuePair<string, string>("auto", I18n.T("opt.language_auto")));
+            foreach (string code in I18n.GetAvailableLanguageCodes())
+            {
+                list.Add(new KeyValuePair<string, string>(code, I18n.GetLanguageDisplayName(code)));
+            }
+            return list;
+        }
+
         private static void DrawLanguageModeRow(string label, ConfigEntry<string> entry)
         {
             string mode = I18n.NormalizeLanguageMode(entry.Value);
+            List<KeyValuePair<string, string>> options = BuildLanguageOptions();
+            const int perRow = 4;
+
             GUILayout.BeginHorizontal();
             GUILayout.Label(label, GUILayout.MinWidth(LabelColW), GUILayout.ExpandWidth(false),
                 GUILayout.MinHeight(RowMinHeight));
             GUILayout.Space(20f);
-            if (GUILayout.Button(I18n.T("opt.language_auto"),
-                mode == "auto" ? BlackWhiteSkin.TabActiveStyle : BlackWhiteSkin.TabStyle,
-                GUILayout.MinWidth(140f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight)) && mode != "auto")
+            GUILayout.BeginVertical();
+            for (int i = 0; i < options.Count; i += perRow)
             {
-                entry.Value = "auto";
-                MenuButtonUiInjector.RefreshButtonText();
-                GUIUtility.ExitGUI();
+                GUILayout.BeginHorizontal();
+                int end = Math.Min(i + perRow, options.Count);
+                for (int j = i; j < end; j++)
+                {
+                    KeyValuePair<string, string> opt = options[j];
+                    if (j > i) GUILayout.Space(8f);
+
+                    bool active = string.Equals(mode, opt.Key, StringComparison.OrdinalIgnoreCase);
+                    if (GUILayout.Button(opt.Value,
+                        active ? BlackWhiteSkin.TabActiveStyle : BlackWhiteSkin.TabStyle,
+                        GUILayout.MinWidth(120f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight))
+                        && !active)
+                    {
+                        entry.Value = opt.Key;
+                        MenuButtonUiInjector.RefreshButtonText();
+                        GUIUtility.ExitGUI();
+                    }
+                }
+                GUILayout.FlexibleSpace();
+                GUILayout.EndHorizontal();
+                GUILayout.Space(4f);
             }
-            GUILayout.Space(8f);
-            if (GUILayout.Button(I18n.T("opt.language_zh"),
-                mode == "zh" ? BlackWhiteSkin.TabActiveStyle : BlackWhiteSkin.TabStyle,
-                GUILayout.MinWidth(120f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight)) && mode != "zh")
-            {
-                entry.Value = "zh";
-                MenuButtonUiInjector.RefreshButtonText();
-                GUIUtility.ExitGUI();
-            }
-            GUILayout.Space(8f);
-            if (GUILayout.Button(I18n.T("opt.language_en"),
-                mode == "en" ? BlackWhiteSkin.TabActiveStyle : BlackWhiteSkin.TabStyle,
-                GUILayout.MinWidth(120f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight)) && mode != "en")
-            {
-                entry.Value = "en";
-                MenuButtonUiInjector.RefreshButtonText();
-                GUIUtility.ExitGUI();
-            }
+            GUILayout.EndVertical();
+
             GUILayout.FlexibleSpace();
             GUILayout.EndHorizontal();
             GUILayout.Space(6f);
         }
+
 
         private static void DrawFloatSlider(string label, ConfigEntry<float> entry, float min, float max,
             float snap, Action onChanged)
