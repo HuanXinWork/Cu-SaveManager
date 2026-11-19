@@ -4,6 +4,7 @@ using System.IO;
 using BepInEx.Configuration;
 using UnityEngine;
 
+
 namespace CasualtiesUnknown.SaveManager
 {
     /// <summary>
@@ -963,43 +964,80 @@ namespace CasualtiesUnknown.SaveManager
             return result;
         }
 
+        private static List<KeyValuePair<string, string>> BuildLanguageOptions()
+        {
+            var list = new List<KeyValuePair<string, string>>();
+            list.Add(new KeyValuePair<string, string>("auto", I18n.T("opt.language_auto")));
+            foreach (string code in I18n.GetAvailableLanguageCodes())
+            {
+                list.Add(new KeyValuePair<string, string>(code, I18n.GetLanguageDisplayName(code)));
+            }
+            return list;
+        }
+
         private static void DrawLanguageModeRow(string label, ConfigEntry<string> entry)
         {
             string mode = NormalizeLanguageMode(entry.Value);
+            List<KeyValuePair<string, string>> options = BuildLanguageOptions();
+            const int perRow = 4;
+
             GUILayout.BeginHorizontal();
             GUILayout.Label(label, GUILayout.MinWidth(LabelColW), GUILayout.ExpandWidth(false),
                 GUILayout.MinHeight(RowMinHeight));
             GUILayout.Space(20f);
-            if (GUILayout.Button(I18n.T("opt.language_auto"),
-                mode == "auto" ? BlackWhiteSkin.TabActiveStyle : BlackWhiteSkin.TabStyle,
-                GUILayout.MinWidth(140f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight)))
+
+            GUILayout.BeginVertical();
+            for (int i = 0; i < options.Count; i += perRow)
             {
-                entry.Value = "auto";
+                GUILayout.BeginHorizontal();
+                int end = Math.Min(i + perRow, options.Count);
+                for (int j = i; j < end; j++)
+                {
+                    KeyValuePair<string, string> opt = options[j];
+                    if (j > i) GUILayout.Space(8f);
+
+                    bool active = mode == opt.Key;
+                    if (GUILayout.Button(opt.Value,
+                        active ? BlackWhiteSkin.TabActiveStyle : BlackWhiteSkin.TabStyle,
+                        GUILayout.MinWidth(120f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight)))
+                    {
+                        entry.Value = opt.Key;
+                    }
+                }
+                GUILayout.FlexibleSpace();
+                GUILayout.EndHorizontal();
+                GUILayout.Space(4f);
             }
-            GUILayout.Space(8f);
-            if (GUILayout.Button(I18n.T("opt.language_zh"),
-                mode == "zh" ? BlackWhiteSkin.TabActiveStyle : BlackWhiteSkin.TabStyle,
-                GUILayout.MinWidth(120f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight)))
-            {
-                entry.Value = "zh";
-            }
-            GUILayout.Space(8f);
-            if (GUILayout.Button(I18n.T("opt.language_en"),
-                mode == "en" ? BlackWhiteSkin.TabActiveStyle : BlackWhiteSkin.TabStyle,
-                GUILayout.MinWidth(120f), GUILayout.ExpandWidth(false), GUILayout.MinHeight(RowMinHeight)))
-            {
-                entry.Value = "en";
-            }
+            GUILayout.EndVertical();
+
             GUILayout.FlexibleSpace();
             GUILayout.EndHorizontal();
             GUILayout.Space(6f);
         }
 
-        private static string NormalizeLanguageMode(string mode)
+        private static string NormalizeLanguageMode(string value)
         {
-            if (string.IsNullOrWhiteSpace(mode)) return "auto";
-            mode = mode.Trim().ToLowerInvariant();
-            return mode == "zh" || mode == "en" ? mode : "auto";
+            string v = (value ?? "").Trim();
+            if (v.Length == 0 || string.Equals(v, "auto", StringComparison.OrdinalIgnoreCase))
+                return "auto";
+
+            foreach (string code in I18n.GetAvailableLanguageCodes())
+            {
+                if (string.Equals(code, v, StringComparison.OrdinalIgnoreCase))
+                    return code;
+            }
+
+            // Compatibility with the old meaning “zh”: take the first file starting with zh.
+            if (string.Equals(v, "zh", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (string code in I18n.GetAvailableLanguageCodes())
+                {
+                    if (code.StartsWith("zh", StringComparison.OrdinalIgnoreCase))
+                        return code;
+                }
+            }
+
+            return "auto";
         }
 
         private static void DrawFloatSlider(string label, ConfigEntry<float> entry, float min, float max,

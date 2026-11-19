@@ -3,6 +3,7 @@ using BepInEx;
 using BepInEx.Logging;
 using CasualtiesUnknown.SaveManager.Interop;
 using UnityEngine;
+using System.IO;
 
 namespace CasualtiesUnknown.SaveManager
 {
@@ -50,6 +51,11 @@ namespace CasualtiesUnknown.SaveManager
             ModLog.Debug("[Build] Debug 构建，详细日志已启用");
             ModLog.ShowInConsole = _cfg.ShowLogInConsole.Value;
             _cfg.ShowLogInConsole.SettingChanged += (_, __) => ModLog.ShowInConsole = _cfg.ShowLogInConsole.Value;
+
+            // Searching for translation files when launching the game
+            string localizationDir = Path.Combine(Paths.PluginPath, "CuSaveManagerLocales");
+            I18n.Init(localizationDir);
+
             UpdateChecker.Enabled = _cfg.AcceptUpdateNotice.Value;
             StartingSuppliesOnLoadGuardPatch.Enabled = _cfg.SuppressStartingSuppliesOnLoad.Value;
             _cfg.SuppressStartingSuppliesOnLoad.SettingChanged += (_, __)

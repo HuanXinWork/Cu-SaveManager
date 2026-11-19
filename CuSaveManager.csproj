@@ -15,8 +15,18 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
   </PropertyGroup>
 
+  <!-- Standart languages(It is used if there are no other translation files.) -->
+  <ItemGroup>
+    <EmbeddedResource Include="references\StandartLangs\en.json" />
+    <EmbeddedResource Include="references\StandartLangs\zh.json" />
+  </ItemGroup>
+
   <!-- 运行期解析的依赖：放在本模组 references/ 目录，全部 Private=false -->
   <ItemGroup>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>references\Newtonsoft.Json.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="BepInEx">
       <HintPath>references\BepInEx.dll</HintPath>
       <Private>false</Private>

@@ -1,363 +1,124 @@
+using System;
 using System.Collections.Generic;
+using System.IO;
+using Newtonsoft.Json.Linq;
 using UnityEngine;
+using System.Linq;
+using System.Reflection;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>
-    /// 极简 i18n：两套字典（zh-CN / EN），按 Locale.currentLangName 自动选择。
-    /// 游戏切换语言时会 LoadScene 重启，所以不需要订阅事件，每次 t() 都按当前值判定。
-    /// 找不到 key 返回 key 本身作为可见 fallback。
-    /// </summary>
+/// <summary>
+ /// i18n with external files: each *.json in the localization folder is a separate language.
+ /// The file name (without the extension) is the language code, for example, zh-CN.json, en.json.
+ /// </summary>
     internal static class I18n
     {
+        private const string FallbackLanguage = "en";
+
         private static readonly string[] ChineseKeywords =
         {
             "中文", "汉化", "简中", "简体", "繁中", "繁体", "繁體", "chinese"
         };
 
-        private static readonly Dictionary<string, string> _zh = new Dictionary<string, string>
-        {
-            // 通用
-            ["app.name"] = "存档管理",
-            ["app.menu_button"] = "存档管理",
-            // tab
-            ["tab.settings"] = "设置",
-            ["tab.slots"] = "存档",
-            ["tab.rollback"] = "回档",
-            ["tab.about"] = "关于",
-            // about
-            ["about.title"] = "CuSaveManager",
-            ["about.desc"] = "存档管理：自动备份 / 多槽位 / 死亡回档 / 立即保存，并提供侧栏聚合让其他 mod 嵌入设置面板。",
-            ["about.version"] = "版本：{0}",
-            ["about.sec_links"] = "链接",
-            ["about.link_repo"] = "GitHub 仓库",
-            ["about.link_release"] = "最新版本",
-            ["about.sec_credits"] = "开发人员",
-            ["about.sec_deps"] = "依赖与致谢",
-            // 状态条
-            ["status.save_path"] = "save.sv 路径：{0}",
-            // 模式 / 诊断
-            ["mode.singleplayer"] = "单机",
-            ["mode.multiplayer"] = "多人会话",
-            ["fmt.save_path_diag"] = "存档路径决策：模式={0}，选定={1}，mp_save 存在={2}，单机 save.sv 存在={3}",
-            // 设置：立即保存
-            ["sec.save_now"] = "立即保存",
-            ["lbl.alias_optional"] = "别名（可选）：",
-            ["btn.save_now"] = "立即保存",
-            ["btn.save_exit"] = "存档并退出",
-            // 设置：自动备份
-            ["sec.auto_backup"] = "自动备份",
-            ["sw.auto_backup_enabled"] = "启用定时备份",
-            ["sw.backup_before_overwrite"] = "切回槽位前先备份当前 save.sv",
-            ["fmt.interval_minutes"] = "间隔（分钟）：{0:0.#}",
-            ["fmt.auto_keep_count"] = "每个冒险保留自动槽：{0}",
-            // 设置：死亡回档
-            ["sec.auto_rollback"] = "死亡自动回档",
-            ["sw.auto_rollback_enabled"] = "启用死亡自动回档",
-            ["fmt.rollback_delay"] = "倒计时秒数：{0:0.#}",
-            ["fmt.mp_death_threshold"] = "多人模式触发死亡人数：{0}",
-            ["fmt.recent_slots_limit"] = "回档 tab 显示最近条数：{0}",
-            // 设置：固定世界
-            ["sec.world"] = "固定世界生成",
-            ["lbl.world_engine"] = "生成引擎：",
-            ["opt.engine_qol"] = "QoL（优先）",
-            ["opt.engine_self"] = "本 mod",
-            ["hint.qol_absent"] = "未检测到 QoL，仅可用本 mod 引擎",
-            ["sec.world_mp"] = "多人固定世界",
-            ["lbl.mp_world_engine"] = "多人生成引擎：",
-            ["opt.engine_krok"] = "Together（优先）",
-            ["hint.mp_krok_engine"] = "Together 模式：存档与位置由联机 mod 立刻保存 + 继续游戏恢复",
-            ["lbl.seed_input"] = "种子（留空自动派生）：",
-            ["lbl.pos_mode"] = "回档位置：",
-            ["opt.pos_last"] = "上次位置",
-            ["opt.pos_fixed"] = "固定位置",
-            ["lbl.fixed_x"] = "固定 X：",
-            ["lbl.fixed_y"] = "固定 Y：",
-            ["msg.engine_qol_missing"] = "未检测到 QoL，将使用本 mod 引擎",
-            // 多人回档
-            ["mp.only_host_can_rollback"] = "仅主机可执行多人回档",
-            ["mp.rollback_returning_menu"] = "多人回档：正在让全员返回主菜单…",
-            ["mp.rollback_reloading"] = "多人回档：主机正在重新加载存档…",
-            ["mp.client_skip_autosave"] = "子端模式：跳过自动备份（仅主机持有权威存档）",
-            ["mp.client_cannot_save"] = "子端无法保存存档：多人存档由主机管理",
-            ["mp.current_save_hint"] = "  多人模式（mp_save 由主机在保存时生成）",
-            ["mp.slot_needs_mp_session"] = "该槽位是多人存档，需在多人会话中回档",
-            ["mp.slot_is_singleplayer"] = "该槽位是单人存档，无法在多人会话中回档",
-            ["mp.pid_session_unavailable"] = "多人回档已中止：读不到当前会话的玩家 ID（请在游戏内、且联机模组名册可用时回档），无法校验槽位里的旧玩家 ID",
-            ["mp.pid_map_failed"] = "多人回档已中止：槽位记录的玩家无法与当前会话一一对应（{0}）。当前会话玩家：{1}。请让存档时的原班玩家用相同的传输方式（Steam / 直连）与玩家名重新进房后再回档",
-            ["mp.pid_map_unresolved"] = "存档玩家 {0} 无法对应到当前会话的玩家（当前会话中还有未识别的玩家：{1}）",
-            ["mp.pid_map_ambiguous"] = "存档玩家 {0} 与当前会话中多名玩家无法区分",
-            ["mp.pid_map_collision"] = "玩家 ID 改写后出现重复：{0}，继续回档会串档",
-            ["mp.pid_map_dir_taken"] = "mp_save 内已存在目标玩家目录 {0}，为避免覆盖已拒绝回档",
-            ["mp.restore_dir_busy"] = "多人回档已中止：mp_save 暂存目录被占用（{0}），请关闭占用后重试",
-            ["mp.mod_detected"] = "已检测到多人 mod (Together)，多人存档将按 mp_save 目录管理",
-            ["mp.mod_not_detected"] = "未检测到多人 mod，按单机存档管理",
-            ["qol.mod_detected"] = "已检测到 QoL，固定世界默认交给 QoL（可在面板切到本 mod 引擎）",
-            ["qol.mod_not_detected"] = "未检测到 QoL，固定世界使用本 mod 引擎",
-            // 设置：快捷键
-            ["sec.hotkeys"] = "快捷键",
-            ["lbl.hotkey_toggle_panel"] = "打开 / 关闭本面板：",
-            ["lbl.hotkey_quick_save"] = "立即保存：",
-            ["lbl.hotkey_settings_tab"] = "跳转到设置 tab：",
-            ["btn.unbound"] = "未绑定",
-            // 设置：杂项
-            ["sec.misc"] = "其他",
-            ["lbl.language"] = "界面语言：",
-            ["opt.language_auto"] = "跟随游戏",
-            ["opt.language_zh"] = "中文",
-            ["opt.language_en"] = "English",
-            ["sw.show_log_in_console"] = "在游戏控制台显示模组日志",
-            ["sw.accept_update_notice"] = "接受新版本更新提示",
-            ["sw.suppress_starting_supplies_on_load"] = "读档时不重发起始物资",
-            ["sw.suppress_intro_lifepod_on_load"] = "读档时不重新生成初始救生舱",
-            ["update.available"] = "SaveManager 有新版本：{0}（点击打开 release 页）",
-            ["btn.press_a_key"] = "请按下新按键…",
-            ["btn.clear"] = "清除",
-            // 开关
-            ["sw.on"] = "◀ 开",
-            ["sw.off"] = "关 ▶",
-            // 存档 tab
-            ["fmt.total_slots"] = "当前共有槽位：{0}",
-            ["btn.expand_all"] = "全部展开",
-            ["btn.collapse_all"] = "全部折叠",
-            ["msg.no_slots"] = "  还没有槽位。在游戏内按下立即保存或开启自动备份。",
-            ["lbl.current_save"] = "[当前存档]",
-            ["msg.no_save_yet"] = "  还没有 save.sv（在游戏内推进进度后才会出现）",
-            ["fmt.run_id"] = "  Run ID = #{0}",
-            ["msg.run_id_unknown"] = "  Run ID = 未识别（save.sv 解析失败）",
-            ["fmt.run_id_in_memory"] = "  Run ID = #{0}（当前进度在内存中，尚未写出 save.sv）",
-            ["msg.progress_in_memory"] = "  当前进度在内存中，尚未写出 save.sv",
-            ["fmt.run_id_after_load"] = "  Run ID = #{0}（读档后尚未保存，save.sv 已被游戏消耗）",
-            ["msg.after_load_not_saved"] = "  读档后尚未保存（save.sv 已被游戏消耗）",
-            ["fmt.adventure_named"] = "冒险 #{0}    （{1}）",
-            ["fmt.adventure_unknown"] = "未识别冒险    （{0}）",
-            ["fmt.date_count"] = "{0}    （{1}）",
-            // 卡片
-            ["lbl.tag_pinned"] = "[已标记]",
-            ["lbl.tag_auto"] = "[自动]",
-            ["lbl.tag_manual"] = "[手动]",
-            ["fmt.alias"] = "别名：{0}",
-            ["lbl.alias_unset"] = "(未设置)",
-            ["lbl.is_current_save"] = "【当前存档】",
-            ["fmt.last_played"] = "最后游玩 {0}",
-            ["lbl.time_unknown"] = "未记录",
-            ["btn.load_slot"] = "切换到此存档",
-            ["btn.unpin"] = "取消标记",
-            ["btn.pin"] = "标记保留",
-            ["btn.delete"] = "删除",
-            // 回档 tab
-            ["fmt.status_idle"] = "状态：空闲。当前没有进行中的回档任务。",
-            ["fmt.status_idle_with_error"] = "状态：空闲。上次结果：{0}",
-            ["fmt.status_counting"] = "状态：将在 {0} 秒后回档至 {1}",
-            ["status.executing"] = "状态：正在加载存档场景...",
-            ["btn.cancel_rollback"] = "取消回档",
-            ["lbl.date_filter"] = "日期筛选：",
-            ["btn.filter_all"] = "全部",
-            ["btn.filter_all_active"] = "[全部]",
-            ["btn.rollback"] = "回档",
-            ["msg.no_rollback_targets"] = "  没有可回档的槽位。请在游戏中保存或开启自动备份。",
-            ["msg.run_id_unresolved_mixed"] = "  警告：当前冒险身份未解析，下方列表可能混有其他冒险的备份；回档到其他冒险会进入不同世界。",
-            ["msg.no_rollback_targets_filtered"] = "  当前日期筛选下没有槽位。",
-            // 业务 / 提示
-            ["fmt.saved_to"] = "已保存：{0}（来源 {1}）",
-            ["fmt.save_failed"] = "立即保存失败：{0}",
-            ["fmt.auto_backup_done"] = "自动备份：{0}",
-            ["fmt.auto_backup_failed"] = "自动备份失败：{0}",
-            ["fmt.save_exit_failed"] = "存档并退出失败：{0}",
-            ["fmt.restored_to"] = "已切回 {0}。请回主菜单点 Load 让游戏读取。",
-            ["fmt.restore_failed"] = "切回槽位失败：{0}",
-            ["fmt.deleted"] = "已删除 {0}",
-            ["fmt.delete_failed"] = "删除槽位失败：{0}",
-            ["fmt.rollback_in_seconds"] = "将在 {0} 秒后回档至：{1}",
-            ["msg.rollback_canceled"] = "回档已取消",
-            ["msg.rollback_loading"] = "回档中...",
-            ["msg.save_exit_unavailable"] = "当前不在可存档的游戏场景中",
-            ["msg.save_layer_transition"] = "世界正在进入下一层，请稍后再存档",
-            ["msg.save_skip_layer_transition"] = "世界进层中，跳过本次自动备份",
-            ["msg.save_exit_singleplayer_only"] = "存档并退出目前仅支持单机",
-            ["msg.save_exit_done"] = "已保存当前进度并返回主菜单",
-            ["msg.save_exit_mp_done"] = "已保存多人存档并返回主菜单（主菜单继续游戏可恢复）",
-            ["fmt.rollback_failed"] = "回档失败：{0}",
-            ["msg.rollback_no_target"] = "无可用备份，无法自动回档",
-            ["msg.rollback_target_missing"] = "目标槽位不存在或已损坏",
-            ["msg.user_cancel"] = "用户取消",
-            ["lbl.before_load_alias"] = "切回前自动备份",
-            ["lbl.save_exit_alias"] = "存档并退出",
-        };
+        private static readonly Dictionary<string, Dictionary<string, string>> _languages =
+            new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
 
-        private static readonly Dictionary<string, string> _en = new Dictionary<string, string>
+        /// <summary> Scans the folder and registers all languages. </summary>
+        internal static void Init(string localizationDir)
         {
-            ["app.name"] = "Save Manager",
-            ["app.menu_button"] = "Save Manager",
-            ["tab.settings"] = "Settings",
-            ["tab.slots"] = "Slots",
-            ["tab.rollback"] = "Rollback",
-            ["tab.about"] = "About",
-            ["about.title"] = "CuSaveManager",
-            ["about.desc"] = "Auto backup / multi-slot / death rollback / on-demand save, with a sidebar that hosts other mods' settings.",
-            ["about.version"] = "Version: {0}",
-            ["about.sec_links"] = "Links",
-            ["about.link_repo"] = "GitHub repository",
-            ["about.link_release"] = "Latest release",
-            ["about.sec_credits"] = "Developers",
-            ["about.sec_deps"] = "Dependencies & thanks",
-            ["status.save_path"] = "save.sv path: {0}",
-            ["mode.singleplayer"] = "singleplayer",
-            ["mode.multiplayer"] = "multiplayer session",
-            ["fmt.save_path_diag"] = "save path decision: mode={0}, chosen={1}, mp_save exists={2}, vanilla save.sv exists={3}",
-            ["sec.save_now"] = "Save Now",
-            ["lbl.alias_optional"] = "Alias (optional):",
-            ["btn.save_now"] = "Save Now",
-            ["btn.save_exit"] = "Save && Exit",
-            ["sec.auto_backup"] = "Auto Backup",
-            ["sw.auto_backup_enabled"] = "Enable timed backup",
-            ["sw.backup_before_overwrite"] = "Backup current save.sv before restore",
-            ["fmt.interval_minutes"] = "Interval (minutes): {0:0.#}",
-            ["fmt.auto_keep_count"] = "Auto slots per run: {0}",
-            ["sec.auto_rollback"] = "Auto Rollback on Death",
-            ["sw.auto_rollback_enabled"] = "Enable auto rollback on death",
-            ["fmt.rollback_delay"] = "Countdown seconds: {0:0.#}",
-            ["fmt.mp_death_threshold"] = "Multiplayer death threshold: {0}",
-            ["fmt.recent_slots_limit"] = "Recent slots shown in Rollback tab: {0}",
-            ["sec.world"] = "Deterministic World",
-            ["lbl.world_engine"] = "Engine:",
-            ["opt.engine_qol"] = "QoL (preferred)",
-            ["opt.engine_self"] = "This mod",
-            ["hint.qol_absent"] = "QoL not detected; only this mod's engine is available",
-            ["sec.world_mp"] = "Multiplayer Deterministic World",
-            ["lbl.mp_world_engine"] = "MP engine:",
-            ["opt.engine_krok"] = "Together (preferred)",
-            ["hint.mp_krok_engine"] = "Together mode: save/position restored via native save + continue game",
-            ["lbl.seed_input"] = "Seed (blank = auto):",
-            ["lbl.pos_mode"] = "Respawn position:",
-            ["opt.pos_last"] = "Last position",
-            ["opt.pos_fixed"] = "Fixed position",
-            ["lbl.fixed_x"] = "Fixed X:",
-            ["lbl.fixed_y"] = "Fixed Y:",
-            ["msg.engine_qol_missing"] = "QoL not detected, using this mod's engine",
-            ["mp.only_host_can_rollback"] = "Only the host can perform multiplayer rollback",
-            ["mp.rollback_returning_menu"] = "MP rollback: returning everyone to main menu...",
-            ["mp.rollback_reloading"] = "MP rollback: host is reloading the save...",
-            ["mp.client_skip_autosave"] = "Client mode: skipping auto backup (only host holds authoritative save)",
-            ["mp.client_cannot_save"] = "Client cannot save: multiplayer saves are managed by the host",
-            ["mp.current_save_hint"] = "  Multiplayer (mp_save is generated by host on save)",
-            ["mp.slot_needs_mp_session"] = "This slot is a multiplayer save; roll back inside a multiplayer session",
-            ["mp.slot_is_singleplayer"] = "This slot is a singleplayer save; cannot roll back during a multiplayer session",
-            ["mp.pid_session_unavailable"] = "MP rollback aborted: current session player IDs are unavailable (roll back in-game with the Together roster available), so the slot's old IDs cannot be verified",
-            ["mp.pid_map_failed"] = "MP rollback aborted: players recorded in the slot cannot be matched one-to-one with the current session ({0}). Players now: {1}. Re-invite the original players with the same transport (Steam / direct) and player names, then roll back again",
-            ["mp.pid_map_unresolved"] = "Saved player {0} cannot be matched to a player in the current session (unmatched players now: {1})",
-            ["mp.pid_map_ambiguous"] = "Saved player {0} matches several players in the current session",
-            ["mp.pid_map_collision"] = "Player IDs collide after rewriting: {0}; rolling back would mix up saves",
-            ["mp.pid_map_dir_taken"] = "Target player directory {0} already exists in mp_save; rollback refused to avoid overwriting it",
-            ["mp.restore_dir_busy"] = "MP rollback aborted: the mp_save staging directory is in use ({0}); release it and retry",
-            ["mp.mod_detected"] = "Multiplayer mod (Together) detected; MP saves managed as mp_save directory",
-            ["mp.mod_not_detected"] = "No multiplayer mod detected; managing singleplayer saves",
-            ["qol.mod_detected"] = "QoL detected; deterministic world defers to QoL (switch to this mod's engine in panel)",
-            ["qol.mod_not_detected"] = "QoL not detected; using this mod's deterministic world engine",
-            ["sec.hotkeys"] = "Hotkeys",
-            ["lbl.hotkey_toggle_panel"] = "Open / close panel:",
-            ["lbl.hotkey_quick_save"] = "Save now:",
-            ["lbl.hotkey_settings_tab"] = "Jump to Settings tab:",
-            ["btn.unbound"] = "Unbound",
-            ["sec.misc"] = "Misc",
-            ["lbl.language"] = "UI language:",
-            ["opt.language_auto"] = "Follow game",
-            ["opt.language_zh"] = "Chinese",
-            ["opt.language_en"] = "English",
-            ["sw.show_log_in_console"] = "Show mod logs in game console",
-            ["sw.accept_update_notice"] = "Accept update notifications",
-            ["sw.suppress_starting_supplies_on_load"] = "Skip starting supplies on load",
-            ["sw.suppress_intro_lifepod_on_load"] = "Skip intro Lifepod on load",
-            ["update.available"] = "SaveManager update available: {0} (click to open release page)",
-            ["btn.press_a_key"] = "Press a new key...",
-            ["btn.clear"] = "Clear",
-            ["sw.on"] = "◀ ON",
-            ["sw.off"] = "OFF ▶",
-            ["fmt.total_slots"] = "Total slots: {0}",
-            ["btn.expand_all"] = "Expand all",
-            ["btn.collapse_all"] = "Collapse all",
-            ["msg.no_slots"] = "  No slots yet. Save in-game or enable auto backup.",
-            ["lbl.current_save"] = "[Current save]",
-            ["msg.no_save_yet"] = "  No save.sv yet (will appear after progressing in-game).",
-            ["fmt.run_id"] = "  Run ID = #{0}",
-            ["msg.run_id_unknown"] = "  Run ID = unknown (save.sv parse failed)",
-            ["fmt.run_id_in_memory"] = "  Run ID = #{0} (progress is in memory; save.sv not written yet)",
-            ["msg.progress_in_memory"] = "  Progress is in memory; save.sv has not been written yet.",
-            ["fmt.run_id_after_load"] = "  Run ID = #{0} (loaded but not saved yet; the game consumed save.sv)",
-            ["msg.after_load_not_saved"] = "  Loaded but not saved yet (the game consumed save.sv).",
-            ["fmt.adventure_named"] = "Run #{0}    ({1})",
-            ["fmt.adventure_unknown"] = "Unknown run    ({0})",
-            ["fmt.date_count"] = "{0}    ({1})",
-            ["lbl.tag_pinned"] = "[Pinned]",
-            ["lbl.tag_auto"] = "[Auto]",
-            ["lbl.tag_manual"] = "[Manual]",
-            ["fmt.alias"] = "Alias: {0}",
-            ["lbl.alias_unset"] = "(unset)",
-            ["lbl.is_current_save"] = "[Current save]",
-            ["fmt.last_played"] = "Last played {0}",
-            ["lbl.time_unknown"] = "unknown",
-            ["btn.load_slot"] = "Load this slot",
-            ["btn.unpin"] = "Unpin",
-            ["btn.pin"] = "Pin",
-            ["btn.delete"] = "Delete",
-            ["fmt.status_idle"] = "Status: idle. No rollback in progress.",
-            ["fmt.status_idle_with_error"] = "Status: idle. Last result: {0}",
-            ["fmt.status_counting"] = "Status: rolling back to {1} in {0}s",
-            ["status.executing"] = "Status: loading save scene...",
-            ["btn.cancel_rollback"] = "Cancel rollback",
-            ["lbl.date_filter"] = "Date filter:",
-            ["btn.filter_all"] = "All",
-            ["btn.filter_all_active"] = "[All]",
-            ["btn.rollback"] = "Roll back",
-            ["msg.no_rollback_targets"] = "  No rollback targets. Save in-game or enable auto backup.",
-            ["msg.run_id_unresolved_mixed"] = "  Warning: current run identity unresolved; the list may include backups from other runs. Rolling back to another run loads a different world.",
-            ["msg.no_rollback_targets_filtered"] = "  No slots match the current date filter.",
-            ["fmt.saved_to"] = "Saved: {0} (from {1})",
-            ["fmt.save_failed"] = "Save failed: {0}",
-            ["fmt.auto_backup_done"] = "Auto backup: {0}",
-            ["fmt.auto_backup_failed"] = "Auto backup failed: {0}",
-            ["fmt.save_exit_failed"] = "Save & exit failed: {0}",
-            ["fmt.restored_to"] = "Restored {0}. Return to main menu and click Load.",
-            ["fmt.restore_failed"] = "Restore failed: {0}",
-            ["fmt.deleted"] = "Deleted {0}",
-            ["fmt.delete_failed"] = "Delete failed: {0}",
-            ["fmt.rollback_in_seconds"] = "Rolling back in {0}s to: {1}",
-            ["msg.rollback_canceled"] = "Rollback canceled",
-            ["msg.rollback_loading"] = "Rolling back...",
-            ["msg.save_exit_unavailable"] = "Save & exit is unavailable in the current scene",
-            ["msg.save_layer_transition"] = "World is descending to the next layer; save again after it finishes",
-            ["msg.save_skip_layer_transition"] = "Layer transition in progress; skipped auto-backup",
-            ["msg.save_exit_singleplayer_only"] = "Save & exit currently supports singleplayer only",
-            ["msg.save_exit_done"] = "Saved current progress and returned to main menu",
-            ["msg.save_exit_mp_done"] = "Multiplayer save written; returned to main menu (use Continue to resume)",
-            ["fmt.rollback_failed"] = "Rollback failed: {0}",
-            ["msg.rollback_no_target"] = "No backup available, cannot auto-rollback",
-            ["msg.rollback_target_missing"] = "Target slot missing or corrupted",
-            ["msg.user_cancel"] = "User canceled",
-            ["lbl.before_load_alias"] = "Auto backup before restore",
-            ["lbl.save_exit_alias"] = "Save & exit",
-        };
-
-        /// <summary>当前语言判定：支持自定义中文包名称关键词，并允许配置强制切换 zh/en。</summary>
-        private static Dictionary<string, string> Current
-        {
-            get
+            Directory.CreateDirectory(localizationDir);
+            bool hasAnyJson = Directory.GetFiles(localizationDir, "*.json").Length > 0;
+            if (!hasAnyJson)
             {
-                return UseChinese() ? _zh : _en;
+                EnsureDefaultLanguages(localizationDir);
+            }
+
+            _languages.Clear();
+
+            if (!Directory.Exists(localizationDir))
+            {
+                Directory.CreateDirectory(localizationDir);
+                Debug.LogWarning("[SaveManager] The localization folder has been created, but there are no files: " + localizationDir);
+                return;
+            }
+
+            foreach (string path in Directory.GetFiles(localizationDir, "*.json"))
+            {
+                string code = Path.GetFileNameWithoutExtension(path);
+                Dictionary<string, string> dict = ReadFile(path);
+                if (dict != null)
+                {
+                    _languages[code] = dict;
+                    Debug.Log("[SaveManager] Loaded language: " + code);
+                }
+            }
+
+            if (!_languages.ContainsKey(FallbackLanguage))
+            {
+                Debug.LogWarning("[SaveManager] File not found: " + FallbackLanguage + ".json, show key.");
             }
         }
 
-        private static bool UseChinese()
+        private static Dictionary<string, string> ReadFile(string path)
         {
-            switch (NormalizeLanguageMode(Plugin.PreferredLanguageMode))
+            try
             {
-                case "zh":
-                    return true;
-                case "en":
-                    return false;
-                default:
-                    return IsChineseLocaleName(ReadCurrentLanguageName());
+                JObject root = JObject.Parse(File.ReadAllText(path));
+                JArray entries = root["entries"] as JArray;
+                if (entries == null)
+                {
+                    Debug.LogWarning("[SaveManager] Invalid translation file: " + path);
+                    return null;
+                }
+
+                var dict = new Dictionary<string, string>();
+                foreach (JToken token in entries)
+                {
+                    string key = (string)token["key"];
+                    if (string.IsNullOrEmpty(key))
+                    {
+                        continue;
+                    }
+                    dict[key] = (string)token["value"] ?? string.Empty;
+                }
+                return dict;
             }
+            catch (Exception ex)
+            {
+                Debug.LogError("[SaveManager] Read error " + path + ": " + ex.Message);
+                return null;
+            }
+        }
+
+        /// <summary> Returns the language code that should be used now, or null if there is no suitable one. </summary>
+        private static string ResolveLanguageCode()
+        {
+            string mode = NormalizeLanguageMode(Plugin.PreferredLanguageMode);
+            if (mode != "auto")
+            {
+                return _languages.ContainsKey(mode) ? mode : null;
+            }
+
+            string localeName = StripRichText(ReadCurrentLanguageName()).Trim();
+
+            if (IsChineseLocaleName(localeName))
+            {
+                foreach (string code in _languages.Keys)
+                {
+                    if (code.StartsWith("zh", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return code;
+                    }
+                }
+            }
+
+            if (!string.IsNullOrEmpty(localeName) && _languages.ContainsKey(localeName))
+            {
+                return localeName;
+            }
+
+            return null;
         }
 
         private static string ReadCurrentLanguageName()
@@ -374,27 +135,25 @@ namespace CasualtiesUnknown.SaveManager
         private static string NormalizeLanguageMode(string mode)
         {
             if (string.IsNullOrWhiteSpace(mode)) return "auto";
-            mode = mode.Trim().ToLowerInvariant();
-            return mode == "zh" || mode == "en" ? mode : "auto";
+            return mode.Trim();
         }
 
         private static bool IsChineseLocaleName(string name)
         {
-            string normalized = StripRichText(name).Trim();
-            if (string.IsNullOrEmpty(normalized))
+            if (string.IsNullOrEmpty(name))
             {
                 return false;
             }
 
-            if (normalized.StartsWith("zh", System.StringComparison.OrdinalIgnoreCase)
-                || normalized.StartsWith("WC", System.StringComparison.OrdinalIgnoreCase))
+            if (name.StartsWith("zh", StringComparison.OrdinalIgnoreCase)
+                || name.StartsWith("WC", StringComparison.OrdinalIgnoreCase))
             {
                 return true;
             }
 
             for (int i = 0; i < ChineseKeywords.Length; i++)
             {
-                if (normalized.IndexOf(ChineseKeywords[i], System.StringComparison.OrdinalIgnoreCase) >= 0)
+                if (name.IndexOf(ChineseKeywords[i], StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     return true;
                 }
@@ -412,32 +171,29 @@ namespace CasualtiesUnknown.SaveManager
 
             var sb = new System.Text.StringBuilder(value.Length);
             bool inTag = false;
-            for (int i = 0; i < value.Length; i++)
+            foreach (char ch in value)
             {
-                char ch = value[i];
-                if (ch == '<')
-                {
-                    inTag = true;
-                    continue;
-                }
-                if (ch == '>')
-                {
-                    inTag = false;
-                    continue;
-                }
-                if (!inTag)
-                {
-                    sb.Append(ch);
-                }
+                if (ch == '<') { inTag = true; continue; }
+                if (ch == '>') { inTag = false; continue; }
+                if (!inTag) sb.Append(ch);
             }
-
             return sb.ToString();
         }
 
         internal static string T(string key)
         {
-            if (Current.TryGetValue(key, out var v)) return v;
-            // 找不到 key 时回落到 key 本身做可见占位
+            string code = ResolveLanguageCode();
+            if (code != null && _languages[code].TryGetValue(key, out string value))
+            {
+                return value;
+            }
+
+            if (_languages.TryGetValue(FallbackLanguage, out Dictionary<string, string> en)
+                && en.TryGetValue(key, out string fallback))
+            {
+                return fallback;
+            }
+
             return key;
         }
 
@@ -446,6 +202,57 @@ namespace CasualtiesUnknown.SaveManager
             string fmt = T(key);
             try { return string.Format(fmt, args); }
             catch { return fmt; }
+        }
+
+        public static IEnumerable<string> GetAvailableLanguageCodes()
+        {
+            return _languages.Keys
+                .Where(k => !string.Equals(k, "auto", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(k => k, StringComparer.OrdinalIgnoreCase);
+        }
+
+        public static string GetLanguageDisplayName(string code)
+        {
+            Dictionary<string, string> dict;
+            if (_languages.TryGetValue(code, out dict))
+            {
+                string name;
+                if (dict.TryGetValue("lang.name", out name) && !string.IsNullOrWhiteSpace(name))
+                    return name;
+            }
+            return code;
+        }
+        private static readonly string[] DefaultLanguageFiles = { "en.json", "zh.json" };
+
+        ///<summary> Creates the default localization files (en.json and zh-CN.json) in the given
+        ///          folder when they do not already exist. </summary>
+        private static void EnsureDefaultLanguages(string localizationDir)
+        {
+            Assembly asm = typeof(I18n).Assembly;
+            string[] resources = asm.GetManifestResourceNames();
+
+            foreach (string fileName in DefaultLanguageFiles)
+            {
+                string target = Path.Combine(localizationDir, fileName);
+                if (File.Exists(target))
+                    continue;
+
+                string resourceName = resources.FirstOrDefault(n =>
+                    n.EndsWith("." + fileName, StringComparison.OrdinalIgnoreCase));
+
+                if (resourceName == null)
+                {
+                    Debug.LogWarning("[SaveManager] The built‑in resource " + fileName + " was not found in the assembly.");
+                    continue;
+                }
+
+                using (Stream stream = asm.GetManifestResourceStream(resourceName))
+                using (FileStream fs = File.Create(target))
+                {
+                    stream.CopyTo(fs);
+                }
+                Debug.LogWarning("[SaveManager] A localization file has been created.: " + target);
+            }
         }
     }
 }
