@@ -6,6 +6,8 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using BepInEx;
+using BepInEx.Bootstrap;
 
 namespace CasualtiesUnknown.SaveManager.Interop
 {
@@ -169,6 +171,39 @@ namespace CasualtiesUnknown.SaveManager.Interop
 
         private static Assembly FindTargetAssembly()
         {
+            try
+            {
+                if (Chainloader.PluginInfos != null)
+                {
+                    foreach (KeyValuePair<string, PluginInfo> pair in Chainloader.PluginInfos)
+                    {
+                        PluginInfo info = pair.Value;
+                        if (info?.Instance == null)
+                        {
+                            continue;
+                        }
+
+                        string guid = pair.Key;
+                        string metaName = info.Metadata?.Name;
+                        bool matched = (!string.IsNullOrEmpty(guid) && guid.IndexOf(TargetAssemblyNamePart, StringComparison.OrdinalIgnoreCase) >= 0)
+                            || (!string.IsNullOrEmpty(metaName) && metaName.IndexOf(TargetAssemblyNamePart, StringComparison.OrdinalIgnoreCase) >= 0);
+                        if (!matched)
+                        {
+                            continue;
+                        }
+
+                        Assembly pluginAsm = info.Instance.GetType().Assembly;
+                        if (InteropReflection.FindType(pluginAsm, TerrainPatchTypeName) != null)
+                        {
+                            return pluginAsm;
+                        }
+                    }
+                }
+            }
+            catch (Exception)
+            {
+            }
+
             Assembly self = typeof(LayerUnlockProvider).Assembly;
             Assembly[] assemblies = AppDomain.CurrentDomain.GetAssemblies();
             for (int i = 0; i < assemblies.Length; i++)
@@ -179,8 +214,13 @@ namespace CasualtiesUnknown.SaveManager.Interop
                     continue;
                 }
 
-                string name = candidate.GetName().Name;
-                if (!string.IsNullOrEmpty(name) && name.IndexOf(TargetAssemblyNamePart, StringComparison.OrdinalIgnoreCase) >= 0)
+                string name;
+                try { name = candidate.GetName().Name; }
+                catch (Exception) { continue; }
+
+                if (!string.IsNullOrEmpty(name)
+                    && name.IndexOf(TargetAssemblyNamePart, StringComparison.OrdinalIgnoreCase) >= 0
+                    && InteropReflection.FindType(candidate, TerrainPatchTypeName) != null)
                 {
                     return candidate;
                 }
@@ -293,7 +333,7 @@ namespace CasualtiesUnknown.SaveManager.Interop
             return resolved;
         }
 
-        /// <summary>首次访问时解析目标程序集与协程状态机；程序集尚未加载时不缓存以便后续重试。</summary>
+        /// <summary>首次访问时解析目标程序集与协程状态机；插件扫描完成后对未安装模组缓存负向结果。</summary>
         private bool EnsureResolved()
         {
             if (_resolved)
@@ -311,6 +351,11 @@ namespace CasualtiesUnknown.SaveManager.Interop
                 Assembly assembly = FindTargetAssembly();
                 if (assembly == null)
                 {
+                    if (InteropBootstrap.PluginScanComplete)
+                    {
+                        _available = false;
+                        _resolved = true;
+                    }
                     return false;
                 }
 

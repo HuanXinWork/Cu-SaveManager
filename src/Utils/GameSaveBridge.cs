@@ -1,5 +1,6 @@
 using System;
 using System.Reflection;
+using CasualtiesUnknown.SaveManager.Interop;
 using HarmonyLib;
 
 namespace CasualtiesUnknown.SaveManager
@@ -34,13 +35,19 @@ namespace CasualtiesUnknown.SaveManager
                 var world = WorldGeneration.world;
                 if (world == null) return false;
                 if (world.generatingWorld || !world.worldExists) return true;
-                if (DoingRegenField != null && DoingRegenField.GetValue(world) is bool doing && doing) return true;
+                if (DoingRegenField == null)
+                {
+                    InteropDiagnostics.WarnOnce("WorldGeneration.doingRegen",
+                        "WorldGeneration.doingRegen not found; layer transition check degraded.");
+                    return false;
+                }
+                if (DoingRegenField.GetValue(world) is bool doing && doing) return true;
             }
             catch { }
             return false;
         }
 
         internal static bool CanSnapshotCurrentLayer()
-            => !IsWorldRegenerating();
+            => WorldGeneration.world != null && !IsWorldRegenerating();
     }
 }

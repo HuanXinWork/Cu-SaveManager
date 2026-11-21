@@ -26,14 +26,14 @@ namespace CasualtiesUnknown.SaveManager
             if (!SaveSystem.loadedRun) return 0;
             string path = MpSaveLocator.IsMultiplayerSaveActive()
                 ? (MpSaveLocator.ResolveOwnSavePath() ?? MpSaveLocator.ResolveLocalPlayerSavePath())
-                : QolBridge.GetCurrentSaveFilePath();
+                : SaveStore.ResolveActiveSingleplayerSavePath();
             if (path == null || !File.Exists(path)) return 0;
             int v = ReadTotalTraveledFromSv(path);
-            ModLog.Info($"层深：save.sv totalTraveled={v}（{path}）");
+            ModLog.Debug($"层深：save.sv totalTraveled={v}（{path}）");
             return v;
         }
 
-        /// <summary>保存快照后按需将 mp_save 内各玩家 save.sv 的 biome 规范回当前层，并记录 mp_rules.json 状态。</summary>
+        /// <summary>保存快照后按需将 mp_save 内各玩家 save.sv 的 biome 原子规范回当前层，并记录 mp_rules.json 状态。</summary>
         internal static void NormalizeAfterSnapshot(int biomeDepth, bool rewriteBiome)
         {
             if (!MpSaveLocator.HasMpSave()) return;
@@ -63,25 +63,10 @@ namespace CasualtiesUnknown.SaveManager
         /// <summary>记录 mp_rules.json 的原始层状态；LEVEL 与 MODIFIER 由联机模组管理，本模组不改写。</summary>
         private static void ReportMpRules(string stage)
         {
-            ModLog.Info($"mp_rules 原值（{stage}）：{MpRulesJson.Describe(MpSaveLocator.MpRulesPath)}；保持 LEVEL/MODIFIER 原值");
+            ModLog.Debug($"mp_rules 原值（{stage}）：{MpRulesJson.Describe(MpSaveLocator.MpRulesPath)}；保持 LEVEL/MODIFIER 原值");
         }
 
         internal static void NormalizeSaveBiomeField(string fullPath, int biomeDepth)
-        {
-            try
-            {
-                if (!File.Exists(fullPath)) return;
-                byte[] bytes = File.ReadAllBytes(fullPath);
-                string json = SaveSystem.Unzip(bytes);
-                if (string.IsNullOrEmpty(json)) return;
-                string rewritten = TopJson.ReplaceInt(json, "biome", biomeDepth);
-                if (string.Equals(rewritten, json, StringComparison.Ordinal)) return;
-                File.WriteAllBytes(fullPath, SaveSystem.Zip(rewritten));
-            }
-            catch (Exception ex)
-            {
-                ModLog.Warning($"NormalizeSaveBiomeField 失败 {fullPath}: {ex.Message}");
-            }
-        }
+            => SaveStore.NormalizeSaveBiome(fullPath, biomeDepth);
     }
 }

@@ -50,28 +50,28 @@ namespace CasualtiesUnknown.SaveManager
                 return;
             }
 
-            ModLog.Info($"多人存档 pid 记录：{players.Count} 名玩家（{DescribePlayers(players)}）");
+            ModLog.Debug($"多人存档 pid 记录：{players.Count} 名玩家（{DescribePlayers(players)}）");
         }
 
         internal static string RulesBackupPath(string slotPath)
             => string.IsNullOrEmpty(slotPath) ? null : slotPath + RulesBackupSuffix;
 
-        /// <summary>回档解包后将暂存目录中的旧玩家子目录与 PLRPOS 键重映射为当前会话持久 ID；身份存在歧义或未匹配在场玩家时抛异常中止。</summary>
+        /// <summary>回档解包后将暂存目录中的旧玩家子目录与 PLRPOS/PLRCHARS 键重映射为当前会话持久 ID。</summary>
         internal static void RewriteRestoredSave(string extractedDir, string slotPath, SlotSidecar sidecar)
         {
             if (string.IsNullOrEmpty(extractedDir) || !Directory.Exists(extractedDir))
             {
-                throw new InvalidOperationException("多人回档已中止：mp_save 暂存目录不存在（" + extractedDir + "）");
+                throw new InvalidOperationException(I18n.F("mp.restore_dir_busy", extractedDir ?? ""));
             }
 
             string rulesPath = Path.Combine(extractedDir, MpSaveLocator.MpRulesFile);
             if (!File.Exists(rulesPath))
             {
-                throw new InvalidOperationException("多人回档已中止：槽位内缺少 " + MpSaveLocator.MpRulesFile);
+                throw new InvalidOperationException(I18n.T("msg.rollback_target_missing") + " (" + MpSaveLocator.MpRulesFile + ")");
             }
 
             string rules = File.ReadAllText(rulesPath, Encoding.UTF8);
-            ModLog.Info("多人回档 mp_rules 原值（" + Path.GetFileName(slotPath) + "）：" + MpRulesJson.Describe(rulesPath)
+            ModLog.Debug("多人回档 mp_rules 原值（" + Path.GetFileName(slotPath) + "）：" + MpRulesJson.Describe(rulesPath)
                 + "；保持 LEVEL/MODIFIER 原值");
             BackupRules(slotPath, rules);
 
@@ -94,7 +94,8 @@ namespace CasualtiesUnknown.SaveManager
             }
 
             var problems = new List<string>();
-            Dictionary<string, string> mapping = BuildMapping(saved, session, problems, out List<SlotMpPlayer> absent);
+            Dictionary<string, string> mapping = BuildMapping(saved, session, problems,
+                out List<SlotMpPlayer> absent, out bool hasHardError);
             if (problems.Count > 0)
             {
                 string detail = string.Join("；", problems);
@@ -103,8 +104,14 @@ namespace CasualtiesUnknown.SaveManager
                     ModLog.Warning("多人回档：旧槽位玩家 pid 无法对应当前会话，按原样还原。" + detail);
                     return;
                 }
-
-                throw new InvalidOperationException(I18n.F("mp.pid_map_failed", detail, DescribePlayers(session)));
+                if (!hasHardError && Plugin.AllowPartialMpRollback)
+                {
+                    ModLog.Warning("多人回档：允许人员变动回滚已开启，忽略未匹配的旧玩家继续还原：" + detail);
+                }
+                else
+                {
+                    throw new InvalidOperationException(I18n.F("mp.pid_map_failed", detail, DescribePlayers(session)));
+                }
             }
             if (absent.Count > 0)
             {
@@ -113,7 +120,7 @@ namespace CasualtiesUnknown.SaveManager
 
             if (!HasChanges(mapping))
             {
-                ModLog.Info($"多人回档 pid 映射：{mapping.Count} 名玩家 pid 与当前会话一致，无需改写");
+                ModLog.Debug($"多人回档 pid 映射：{mapping.Count} 名玩家 pid 与当前会话一致，无需改写");
                 return;
             }
 
@@ -214,10 +221,12 @@ namespace CasualtiesUnknown.SaveManager
                 CultureInfo.InvariantCulture, out ulong steamId) ? steamId : 0UL;
         }
 
-        /// <summary>按持久 ID、Steam ID、玩家名三轮无歧义匹配会话玩家，并做大小写不敏感的目标键碰撞检查。</summary>
+        /// <summary>按持久 ID、Steam ID、玩家名三轮无歧义匹配会话玩家，区分硬冲突（歧义/键碰撞）与仅未匹配的离线玩家。</summary>
         private static Dictionary<string, string> BuildMapping(List<SlotMpPlayer> saved,
-            IReadOnlyList<InteropPlayerIdentity> session, List<string> problems, out List<SlotMpPlayer> absent)
+            IReadOnlyList<InteropPlayerIdentity> session, List<string> problems,
+            out List<SlotMpPlayer> absent, out bool hasHardError)
         {
+            hasHardError = false;
             var mapping = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var pending = new List<SlotMpPlayer>(saved);
@@ -241,6 +250,7 @@ namespace CasualtiesUnknown.SaveManager
                 if (ambiguous.Contains(record.PersistentId))
                 {
                     problems.Add(I18n.F("mp.pid_map_ambiguous", who));
+                    hasHardError = true;
                 }
                 else if (unmatchedPresent.Count > 0)
                 {
@@ -258,6 +268,7 @@ namespace CasualtiesUnknown.SaveManager
             foreach (string target in collisions)
             {
                 problems.Add(I18n.F("mp.pid_map_collision", target));
+                hasHardError = true;
             }
 
             return mapping;
@@ -406,7 +417,7 @@ namespace CasualtiesUnknown.SaveManager
             string rewritten = MpRulesJson.RewritePlrPosKeys(rules, mapping);
             if (string.Equals(rewritten, rules, StringComparison.Ordinal))
             {
-                ModLog.Info("多人回档：PLRPOS/PLRCHARS 键与当前会话一致，未改写 mp_rules.json");
+                ModLog.Debug("多人回档：PLRPOS/PLRCHARS 键与当前会话一致，未改写 mp_rules.json");
                 return;
             }
 
@@ -432,32 +443,36 @@ namespace CasualtiesUnknown.SaveManager
             var actual = new HashSet<string>(actualKeys, StringComparer.Ordinal);
             if (!expected.SetEquals(actual))
             {
-                throw new InvalidOperationException("多人回档已中止：mp_rules.json 的 " + blockName + " 键改写后校验失败（预期 "
-                    + expected.Count + " 个键，实际 " + actual.Count + " 个）");
+                throw new InvalidOperationException(I18n.F("mp.pid_map_collision",
+                    $"{blockName} ({actual.Count}/{expected.Count})"));
             }
 
             foreach (string key in originalKeys)
             {
                 if (mapping.TryGetValue(key, out string target) && !string.Equals(key, target, StringComparison.Ordinal))
                 {
-                    ModLog.Info($"mp_rules {blockName} 键改写：\"{key}\" → \"{target}\"");
+                    ModLog.Debug($"mp_rules {blockName} 键改写：\"{key}\" → \"{target}\"");
                 }
             }
         }
 
+        /// <summary>仅在 Debug 构建写出 mp_rules 原始副本供排障，避免正式版残留只写不读的孤儿文件。</summary>
+        [System.Diagnostics.Conditional("DEBUG")]
         private static void BackupRules(string slotPath, string rules)
         {
+#if DEBUG
             try
             {
                 string backupPath = RulesBackupPath(slotPath);
                 if (string.IsNullOrEmpty(backupPath)) return;
                 File.WriteAllText(backupPath, rules, TopJson.Utf8NoBom);
-                ModLog.Info("mp_rules 原始副本已写入：" + backupPath);
+                ModLog.Debug("mp_rules 原始副本已写入：" + backupPath);
             }
             catch (Exception ex)
             {
                 ModLog.Warning($"mp_rules 原始副本写入失败：{ex.Message}");
             }
+#endif
         }
 
         private static string DescribePlayers(List<SlotMpPlayer> players)

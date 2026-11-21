@@ -1,7 +1,6 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using HarmonyLib;
 using UnityEngine;
@@ -11,13 +10,16 @@ namespace CasualtiesUnknown.SaveManager
     /// <summary>多人回档玩家坐标恢复：在 FinishWorldGeneration 协程跑完后按 persistentId 跟踪并持续还原主客端位置。</summary>
     internal static class MpPositionRestorer
     {
-        // 给 ModHooks.SpawnPositionOverride 预留短暂窗口，超时仍未全员恢复则无缝回退至本地写回 + Server_TeleportCharacter 兜底。
+        // 给 ModHooks.SpawnPositionOverride 预留短暂窗口，超时仍未全员落位则无缝回退至本地写回 + Server_TeleportCharacter 兜底。
         private const float HookFallbackDelaySeconds = 1.5f;
+        private const float HookVerifyDistanceSqr = 9f;
 
         private static bool _activeSession;
         private static int _sessionId;
         private static Dictionary<string, Vector2> _pending;
         private static HashSet<string> _restored;
+        private static HashSet<string> _hookQueried;
+        private static Dictionary<string, Body> _trackedBodies;
 
         internal static bool ActiveSession => _activeSession;
 
@@ -34,16 +36,24 @@ namespace CasualtiesUnknown.SaveManager
             _activeSession = false;
             _pending = null;
             _restored = null;
+            _hookQueried = null;
+            _trackedBodies = null;
             TogetherModHooksBridge.SetRestoreSavedPositions(false);
         }
 
-        internal static Vector2? TryResolveHookPosition(string persistentId)
+        internal static Vector2? TryResolveHookPosition(string persistentId, Body body = null)
         {
             if (!_activeSession || _pending == null || string.IsNullOrEmpty(persistentId))
                 return null;
             if (!_pending.TryGetValue(persistentId, out Vector2 pos))
                 return null;
-            _restored?.Add(persistentId);
+
+            // 仅记录钩子已查询及对应角色体引用，待实际落位核验通过后才记入 _restored，防止宿主询问后放弃该坐标时漏掉兜底传送。
+            _hookQueried?.Add(persistentId);
+            if (body != null && _trackedBodies != null)
+            {
+                _trackedBodies[persistentId] = body;
+            }
             ModLog.Info($"多人回档 ModHooks.SpawnPositionOverride：{persistentId} → ({pos.x:0.0},{pos.y:0.0})");
             return pos;
         }
@@ -97,12 +107,14 @@ namespace CasualtiesUnknown.SaveManager
             _sessionId++;
             _pending = positions;
             _restored = new HashSet<string>(StringComparer.Ordinal);
+            _hookQueried = new HashSet<string>(StringComparer.Ordinal);
+            _trackedBodies = new Dictionary<string, Body>(StringComparer.Ordinal);
             _activeSession = true;
             TogetherModHooksBridge.SetRestoreSavedPositions(true);
             ModLog.Info($"多人回档：已缓存 {positions.Count} 名玩家位置");
             foreach (var kv in positions)
             {
-                ModLog.Info($"  PLRPOS {kv.Key} = ({kv.Value.x:0.0},{kv.Value.y:0.0})");
+                ModLog.Debug($"  PLRPOS {kv.Key} = ({kv.Value.x:0.0},{kv.Value.y:0.0})");
             }
         }
 
@@ -141,6 +153,8 @@ namespace CasualtiesUnknown.SaveManager
                     {
                         if (_sessionId != capturedSession || !_activeSession || _pending == null)
                             return true;
+
+                        ConfirmHookedPositions(fallbackActivated);
                         if (AreAllConnectedPendingRestored())
                             return true;
 
@@ -152,11 +166,11 @@ namespace CasualtiesUnknown.SaveManager
                         if (Time.unscaledTime < fallbackAt)
                             return false;
 
-                        // 超过宽限期仍有在线玩家未通过 SpawnPositionOverride 落位（如断线重连或极端时序），回退启用主动坐标写回安全网。
+                        // 超过宽限期仍有在线玩家未落位（如未调用钩子、询问后未采纳或断线重连），启用主动坐标写回安全网。
                         if (!fallbackActivated)
                         {
                             fallbackActivated = true;
-                            ModLog.Info($"多人回档：ModHooks 出生点覆写等待 {HookFallbackDelaySeconds:0.0}s 后仍有未恢复玩家（{_restored?.Count ?? 0}/{_pending.Count}），启用兜底坐标写回");
+                            ModLog.Info($"多人回档：ModHooks 出生点覆写等待 {HookFallbackDelaySeconds:0.0}s 后仍有未确认落位玩家（{_restored?.Count ?? 0}/{_pending.Count}），启用兜底坐标写回");
                             ApplyLocalHostPositionIfPending();
                         }
 
@@ -168,7 +182,7 @@ namespace CasualtiesUnknown.SaveManager
                 return;
             }
 
-            ApplyLocalHostPosition(_pending);
+            ApplyLocalHostPositionIfPending();
 
             var runner = MpRollbackRunner.Instance;
             if (runner != null)
@@ -179,6 +193,42 @@ namespace CasualtiesUnknown.SaveManager
             {
                 TryRestoreRemaining();
                 EndSession(capturedSession);
+            }
+        }
+
+        private static void ConfirmHookedPositions(bool pastGraceWindow)
+        {
+            if (_pending == null || _restored == null || _hookQueried == null || _hookQueried.Count == 0)
+                return;
+
+            string localId = MultiplayerBridge.GetLocalPersistentId();
+            foreach (string pid in _hookQueried)
+            {
+                if (_restored.Contains(pid) || !_pending.TryGetValue(pid, out Vector2 target))
+                    continue;
+
+                Body body = null;
+                if (_trackedBodies != null)
+                {
+                    _trackedBodies.TryGetValue(pid, out body);
+                }
+                if (body == null && !string.IsNullOrEmpty(localId) && pid == localId)
+                {
+                    body = PlayerCamera.main != null ? PlayerCamera.main.body : null;
+                }
+
+                if (body != null)
+                {
+                    if (((Vector2)body.transform.position - target).sqrMagnitude <= HookVerifyDistanceSqr)
+                    {
+                        _restored.Add(pid);
+                    }
+                }
+                else if (!pastGraceWindow)
+                {
+                    // 宿主未向钩子提供 Body 引用（如纯远端发包路径）时，在宽限期内认可钩子已分发，避免无谓阻塞会话结束。
+                    _restored.Add(pid);
+                }
             }
         }
 
@@ -230,6 +280,8 @@ namespace CasualtiesUnknown.SaveManager
             _activeSession = false;
             _pending = null;
             _restored = null;
+            _hookQueried = null;
+            _trackedBodies = null;
             TogetherModHooksBridge.SetRestoreSavedPositions(false);
         }
 
@@ -245,12 +297,6 @@ namespace CasualtiesUnknown.SaveManager
         {
             if (!_activeSession || _pending == null || _pending.Count == 0) return true;
             if (!MultiplayerBridge.IsMultiplayerRunning()) return true;
-
-            if (!MultiplayerBridge.IsServer())
-            {
-                ApplyLocalHostPosition(_pending);
-                return true;
-            }
 
             string localId = MultiplayerBridge.GetLocalPersistentId();
             var probe = new Dictionary<string, Vector2>(1);
@@ -289,23 +335,11 @@ namespace CasualtiesUnknown.SaveManager
         private static bool ApplyLocalHostPosition(Dictionary<string, Vector2> positions)
         {
             if (positions == null) return false;
-            try
-            {
-                string hostId = MultiplayerBridge.GetLocalPersistentId();
-                if (string.IsNullOrEmpty(hostId) || !positions.TryGetValue(hostId, out Vector2 pos)) return false;
-                var cam = PlayerCamera.main;
-                if (cam == null || cam.body == null) return false;
-                cam.body.transform.position = new Vector3(pos.x, pos.y, 0f);
-                cam.transform.position = new Vector3(pos.x, pos.y, -10f);
-                if (cam.body.rb != null) cam.body.rb.velocity = Vector2.zero;
-                ModLog.Info($"多人回档本地写回：({pos.x:0.0},{pos.y:0.0})");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                ModLog.Warning($"ApplyLocalHostPosition 失败：{ex.Message}");
-                return false;
-            }
+            string hostId = MultiplayerBridge.GetLocalPersistentId();
+            if (string.IsNullOrEmpty(hostId) || !positions.TryGetValue(hostId, out Vector2 pos)) return false;
+            if (!LocalPlayerTeleporter.TryMoveTo(pos, forceZeroZ: true)) return false;
+            ModLog.Info($"多人回档本地写回：({pos.x:0.0},{pos.y:0.0})");
+            return true;
         }
 
         internal static Dictionary<string, Vector2> ReadPlrPosFromMpRules(string rulesPath = null)
@@ -328,33 +362,6 @@ namespace CasualtiesUnknown.SaveManager
     [HarmonyPriority(Priority.Last)]
     internal static class MpPositionFinishPatch
     {
-        private sealed class CompletionEnumerator : IEnumerator, IDisposable
-        {
-            private readonly IEnumerator _inner;
-            private bool _completed;
-
-            internal CompletionEnumerator(IEnumerator inner)
-            {
-                _inner = inner;
-            }
-
-            public object Current => _inner.Current;
-
-            public bool MoveNext()
-            {
-                bool hasNext = _inner.MoveNext();
-                if (!hasNext && !_completed)
-                {
-                    _completed = true;
-                    InvokeAfterFinish();
-                }
-                return hasNext;
-            }
-
-            public void Reset() => _inner.Reset();
-            public void Dispose() => (_inner as IDisposable)?.Dispose();
-        }
-
         internal static void Postfix(ref IEnumerator __result)
         {
             if (__result == null)
@@ -362,7 +369,7 @@ namespace CasualtiesUnknown.SaveManager
                 InvokeAfterFinish();
                 return;
             }
-            __result = new CompletionEnumerator(__result);
+            __result = new CompletionEnumerator(__result, InvokeAfterFinish);
         }
 
         private static void InvokeAfterFinish()

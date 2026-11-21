@@ -15,11 +15,15 @@ namespace CasualtiesUnknown.SaveManager
     /// <summary>回档状态机：单机按 LocalDeathLatched、多人服务端按死亡人数阈值触发倒计时，仅死亡触发在恢复存活时自动取消。</summary>
     internal sealed class RollbackController
     {
+        private const float ExecutingTimeoutSeconds = 20f;
+        private static RollbackController _activeInstance;
+
         private readonly HotkeyConfig _cfg;
         private readonly SaveStore _store;
 
         private RollbackState _state = RollbackState.Idle;
         private float _remaining;
+        private float _executingStartedAt;
         private SlotInfo _target;
         private string _lastError;
         private int _lastBroadcastSecond = -1;
@@ -32,27 +36,52 @@ namespace CasualtiesUnknown.SaveManager
         {
             _cfg = cfg;
             _store = store;
+            _activeInstance = this;
             SceneManager.sceneLoaded += OnSceneLoaded;
         }
 
         internal void Dispose()
         {
             try { SceneManager.sceneLoaded -= OnSceneLoaded; } catch { }
+            if (ReferenceEquals(_activeInstance, this)) _activeInstance = null;
             IsActiveGlobal = false;
             IsDeathSuspected = false;
             PlayerCameraDeathDetector.Reset();
         }
 
+        /// <summary>联机回档阶段一或阶段二中止时立即将 Executing 复位为 Idle，解除全局重生/退主菜单守卫。</summary>
+        internal static void NotifyReloadAborted(string reason = null)
+        {
+            var inst = _activeInstance;
+            if (inst == null)
+            {
+                IsActiveGlobal = false;
+                return;
+            }
+            if (inst._state != RollbackState.Executing) return;
+
+            inst._triggeredByDeath = false;
+            inst._target = null;
+            inst._remaining = 0f;
+            inst._lastBroadcastSecond = -1;
+            inst._lastError = string.IsNullOrEmpty(reason) ? I18n.T("msg.rollback_canceled") : reason;
+            inst.SetState(RollbackState.Idle);
+            ModLog.Warning("回档重载中止，状态机已复位为 Idle：" + inst._lastError);
+        }
+
         private void OnSceneLoaded(Scene s, LoadSceneMode m)
         {
-            _deathHandledThisLife = false;
-            _triggeredByDeath = false;
-            IsDeathSuspected = false;
-            _mpDyingCached = false;
-            _nextMpDeathCheckAt = 0f;
-            PlayerCameraDeathDetector.Reset();
+            if (!MpRollbackController.IsPendingReload)
+            {
+                _deathHandledThisLife = false;
+                IsDeathSuspected = false;
+                _mpDyingCached = false;
+                _nextMpDeathCheckAt = 0f;
+                PlayerCameraDeathDetector.Reset();
+            }
             if (_state == RollbackState.Executing && !MpRollbackController.IsPendingReload)
             {
+                _triggeredByDeath = false;
                 SetState(RollbackState.Idle);
                 _target = null;
                 _remaining = 0f;
@@ -74,14 +103,25 @@ namespace CasualtiesUnknown.SaveManager
         private void SetState(RollbackState s)
         {
             _state = s;
+            if (s == RollbackState.Executing) _executingStartedAt = Time.unscaledTime;
             IsActiveGlobal = s == RollbackState.Counting || s == RollbackState.Executing;
         }
 
-        /// <summary>每帧更新死亡检测、存活恢复复位与倒计时推进。</summary>
+        /// <summary>每帧更新死亡检测、存活恢复复位、执行超时兜底与倒计时推进。</summary>
         internal void Tick()
         {
             try
             {
+                if (_state == RollbackState.Executing && Time.unscaledTime - _executingStartedAt > ExecutingTimeoutSeconds)
+                {
+                    ModLog.Warning($"回档状态机处于 Executing 超过 {ExecutingTimeoutSeconds:0}s，超时强制复位为 Idle");
+                    _triggeredByDeath = false;
+                    _target = null;
+                    _remaining = 0f;
+                    _lastBroadcastSecond = -1;
+                    SetState(RollbackState.Idle);
+                }
+
                 bool dying = IsDying();
                 if (_deathHandledThisLife && !dying)
                 {
@@ -108,10 +148,15 @@ namespace CasualtiesUnknown.SaveManager
             {
                 if (MultiplayerBridge.IsMultiplayerRunning())
                 {
-                    if (!MultiplayerBridge.IsServer() || MultiplayerBridge.IsGamemodeActive()) return false;
+                    if (!MultiplayerBridge.IsServer()) return false;
                     float now = Time.unscaledTime;
                     if (now < _nextMpDeathCheckAt) return _mpDyingCached;
                     _nextMpDeathCheckAt = now + 0.5f;
+                    if (MultiplayerBridge.IsGamemodeActive())
+                    {
+                        _mpDyingCached = false;
+                        return false;
+                    }
                     int dead = MultiplayerBridge.DeadPlayerCount();
                     int threshold = _cfg.MultiplayerDeathThreshold.Value;
                     if (threshold <= 0)
@@ -141,7 +186,11 @@ namespace CasualtiesUnknown.SaveManager
 
         private bool StartRollback(SlotInfo slot, bool triggeredByDeath)
         {
-            if (_state != RollbackState.Idle) return false;
+            if (_state != RollbackState.Idle)
+            {
+                _lastError = I18n.T("msg.rollback_already_active");
+                return false;
+            }
             if (slot == null || !File.Exists(slot.FullSlotPath))
             {
                 _lastError = I18n.T("msg.rollback_target_missing");
@@ -269,14 +318,15 @@ namespace CasualtiesUnknown.SaveManager
                 TryBroadcastMP(I18n.T("msg.rollback_loading"));
 
                 bool multiplayerSlot = _target.Sidecar.IsMultiplayer;
+                bool backupBefore = !_triggeredByDeath && _cfg.BackupBeforeOverwrite.Value;
                 Plugin.ClosePanelIfOpen();
-                _store.RestoreSlotToSave(_target.FullSlotPath, backupBefore: false);
+                _store.RestoreSlotToSave(_target.FullSlotPath, backupBefore);
                 ModLog.Flow("Rollback", "02", "RestoreSlotToSave 完成");
                 if (!multiplayerSlot)
                 {
                     PlayerCharacterBridge.ApplyForSceneReload();
                     SaveSystem.loadedRun = true;
-                    ModLog.Flow("Rollback", "03", "loadedRun=true → LoadScene(SampleScene)");
+                    ModLog.Flow("Rollback", "03", "loadedRun=true → StartLoadSampleScene()");
                     StartLoadSampleScene();
                 }
                 else
@@ -294,7 +344,7 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        /// <summary>触发黑屏遮罩并重新加载游戏主场景。</summary>
+        /// <summary>触发黑屏遮罩并重新加载当前游戏场景（主菜单 PreGen 下切入 SampleScene）。</summary>
         private static void StartLoadSampleScene()
         {
             try
@@ -302,7 +352,9 @@ namespace CasualtiesUnknown.SaveManager
                 GlobalDark.main?.Darken();
             }
             catch { }
-            SceneManager.LoadScene("SampleScene");
+            string sceneName = SceneManager.GetActiveScene().name;
+            if (string.IsNullOrEmpty(sceneName) || sceneName == "PreGen") sceneName = "SampleScene";
+            SceneManager.LoadScene(sceneName);
         }
     }
 }

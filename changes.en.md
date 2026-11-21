@@ -2,6 +2,20 @@
 
 > 中文更新日志：见 [changes.md](changes.md)
 
+## 1.3.5
+
+Moved the save slot directory out of the plugin folder to `Application.persistentDataPath/CuSaveManager/slots` so updating or reinstalling the mod no longer wipes backups. Existing slots and sidecar files from the legacy folder are migrated losslessly on startup, and flat legacy slots are archived by last-modified date. Slot writes and save restores now use same-directory temp files with `File.Replace` for atomic writes. Automatic pre-overwrite backups (capped at the 10 most recent) now also cover manual rollback, `mp_save` deletion when starting a new run, and vanilla `save.sv` overwrites, and the Saves tab adds a counter and cleanup button for stale auto-backups from older runs.
+
+Switched hotkey detection to `Input.GetKeyDown` with explicit Ctrl / Shift / Alt modifier checks so hotkeys fire reliably while holding movement keys. Added automatic timeout resets to single-player rollback (20s) and two-stage multiplayer reload (15s) that release main-menu and layer-transition guards on abort instead of deadlocking. Added `AllowPartialMultiplayerRollback` (continue rollback when party membership changed) and `MpStageTwoDelaySeconds` config entries, and deferred timed auto-backups while the pause menu is open.
+
+Consolidated all patches onto a single Harmony instance with per-type isolated error handling so one broken patch target cannot abort later patches, and cached optional-mod presence after startup to eliminate per-frame assembly scans when Together or QoL is absent. Added a layer-0 seasonal item guard so loading a save no longer spawns duplicate holiday presents, jack-o'-lanterns, or candy.
+
+Redesigned the panel in a translucent black-and-white line style shared across CuSaveManager, CuHotbar, SkinSync, and HwAssistive, with crisp white borders over the live game view and a 4-second inverted two-step confirmation for loading, deleting, and bulk cleanup. Current-save, slot, and rollback cards now render a layer background banner: aspect-fill sprites from QoL Unknown when installed, or 2x pixel-tiled clones of vanilla layer backgrounds otherwise, dimmed for white-text contrast.
+
+Raised the base window size to 1440x900 and removed the old 1.0x scale cap for adaptive scaling and centered placement on 2560x1600 and higher-DPI displays, preserving the window's screen center when switching presets. Added `90% / 100% / 115% / 130%` top-bar scale buttons backed by `ExternalTabRegistry.UiScalePercent` for live shared scaling across all four mods.
+
+Stepped up panel typography across the board (16px bold minimum) with matching card, row, header, and footer heights aligned to the virtualized scroll viewport, and fixed 14 UI clipping and focus issues including wrapped slider readouts, truncated English labels, narrow-window toolbar overflow, middle-elided footer paths, IME composition overlap in the search box, and lingering text focus blocking in-game keys after button clicks.
+
 ## 1.3.4
 
 Fixed the incompatibility with Casualties: Together 5.5.x where a client got stuck on the species selection screen after joining a lobby. 1.3.3 unpatched Together's prefix on `PreRunScript.StartRun` and blocked connected clients with "You can't start the game, server can."; from Together 5.5 on, that prefix (`CharacterSelectWait.OnStartOrLoadClicked`) is exactly what handles the client's Join / Ready up, so clients could neither ready up nor join a running game. The prefix is no longer removed: inside a lobby, whenever Together has `CharacterSelectWait`, `StartRun` is passed through to Together entirely, which also means the host's new run now goes through Together's ready lobby.

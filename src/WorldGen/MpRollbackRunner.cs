@@ -29,12 +29,6 @@ namespace CasualtiesUnknown.SaveManager
             hideFlags = HideFlags.HideAndDontSave;
         }
 
-        internal void RunOnceAfterWorldGenerated(Action apply, Action onComplete = null)
-        {
-            if (apply == null) return;
-            StartCoroutine(ApplyOnceCoroutine(apply, onComplete));
-        }
-
         /// <summary>等待世界生成完成后按固定间隔重试尚未就绪的玩家坐标，直至全员还原、超时或退出联机。</summary>
         internal void RunPositionRestoreWindow(
             Func<bool> stepRestore,
@@ -59,24 +53,18 @@ namespace CasualtiesUnknown.SaveManager
         }
 
         /// <summary>延迟等待客户端切回主菜单后再触发联机继续游戏，避免客户端仍在旧场景时丢弃开局广播。</summary>
-        internal void ScheduleStageTwoReload(Action execute, float delaySeconds = 0.75f, float maxWaitSeconds = 2f)
+        internal void ScheduleStageTwoReload(Action execute, float delaySeconds = -1f)
         {
             if (execute == null) return;
 
+            float effectiveDelay = delaySeconds >= 0f ? delaySeconds : Plugin.MpStageTwoDelaySeconds;
             if (_reloadCoroutine != null)
             {
                 StopCoroutine(_reloadCoroutine);
                 _reloadCoroutine = null;
             }
 
-            _reloadCoroutine = StartCoroutine(StageTwoReloadCoroutine(execute, delaySeconds, maxWaitSeconds));
-        }
-
-        private static IEnumerator ApplyOnceCoroutine(Action apply, Action onComplete)
-        {
-            yield return new WaitUntil(IsWorldGenerated);
-            apply();
-            onComplete?.Invoke();
+            _reloadCoroutine = StartCoroutine(StageTwoReloadCoroutine(execute, effectiveDelay));
         }
 
         private IEnumerator PositionRestoreWindowCoroutine(
@@ -136,16 +124,10 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        private IEnumerator StageTwoReloadCoroutine(Action execute, float delaySeconds, float maxWaitSeconds)
+        private IEnumerator StageTwoReloadCoroutine(Action execute, float delaySeconds)
         {
             float elapsed = 0f;
             while (elapsed < delaySeconds)
-            {
-                elapsed += Time.unscaledDeltaTime;
-                yield return null;
-            }
-
-            while (PreRunScript.instance == null && elapsed < maxWaitSeconds)
             {
                 elapsed += Time.unscaledDeltaTime;
                 yield return null;
@@ -171,7 +153,7 @@ namespace CasualtiesUnknown.SaveManager
         private static MethodInfo ResolveIsWorldGenerated()
         {
             if (_resolveTried) return _mIsWorldGenerated;
-            if (TogetherReflection.ModAssembly == null) return null;
+            if (InteropBootstrap.Together.ModAssembly == null) return null;
 
             _resolveTried = true;
             if (TogetherReflection.TryResolveType("CasualtiesTogetherUtils.Util", out Type utilType))

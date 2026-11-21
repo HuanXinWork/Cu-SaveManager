@@ -2,6 +2,20 @@
 
 > English changelog: see [changes.en.md](changes.en.md)
 
+## 1.3.5
+
+存档槽位目录从插件目录迁至 `Application.persistentDataPath/CuSaveManager/slots`，更新或重装模组不再误删备份；启动时自动无损迁移旧目录槽位与伴生文件，并将平铺旧槽按修改日期归档。写入槽位与还原存档改用同目录临时文件加 `File.Replace` 原子替换；手动回档、开新局删除 `mp_save` 及覆盖原版 `save.sv` 前自动留存备份（覆盖前备份最多保留最近 10 份），存档页新增旧局自动备份统计与清理入口。
+
+快捷键检测改用 `Input.GetKeyDown` 配合 Ctrl / Shift / Alt 修饰键判定，修复按住移动键走路时无法触发热键的问题。单机回档（20 秒）与联机两阶段重载（15 秒）加入超时自动复位，异常中止时同步解除回主菜单与换层拦截，防止状态机锁死；新增 `AllowPartialMultiplayerRollback`（允许联机人员变动后部分回档）与 `MpStageTwoDelaySeconds`（阶段二等待延时）配置项；暂停菜单打开期间顺延定时备份。
+
+全部补丁归入单一 Harmony 实例并按类型独立捕获异常，避免单个补丁失败中断后续补丁挂载；启动完成后缓存可选模组在场结果，消除未安装 Together 或 QoL 时的每帧程序集扫描。新增第 0 层读档节日物品守卫，读档时不再重复刷出礼物盒、南瓜灯与糖果等节日物品。
+
+面板改为半透明纯黑白线条风格，与 CuHotbar、SkinSync、HwAssistive 统一视觉设计，透出游戏画面并以纯白实线分区；读取、删除槽位与清理旧备份加入 4 秒反白二次确认。当前存档卡、槽位卡与回滚卡新增所属层级画面横幅：安装 QoL Unknown 时读取其层级背景精灵等比居中铺满，未安装时克隆游戏原生层级背景贴图做 2x 像素平铺，并叠加压暗遮罩衬托白字。
+
+窗口基准尺寸升至 1440x900，去掉旧版 1.0 倍缩放上限，支持 2560x1600 等高分屏自适应缩放与首次打开居中，切换档位时保持窗口屏幕中心不变。顶栏新增 `90% / 100% / 115% / 130%` 缩放按钮，并通过 `ExternalTabRegistry.UiScalePercent` 与 CuHotbar、SkinSync、HwAssistive 共享缩放比例。
+
+全局字号上调（面板最低 16px 粗体），同步加高卡片、表单行、折叠头与底栏尺寸并与滚动视口裁剪步进对齐；修复滑块数值胶囊（如「全员死亡（0）」）折行削字、英文词条截断、窄窗清理按钮溢出、底栏长路径截断、搜索框输入法组字重叠及点击按钮后残留焦点抢占局内按键等 14 项界面问题。
+
 ## 1.3.4
 
 修复与 Casualties: Together 5.5.x 不兼容、客户端进房后卡在物种选择界面的问题。1.3.3 摘掉了 Together 挂在 `PreRunScript.StartRun` 上的 Prefix，并对联机客户端提示 “You can't start the game, server can.” 后拦截；而 Together 5.5 起客户端的 Join / Ready up 正是由这个 Prefix（`CharacterSelectWait.OnStartOrLoadClicked`）处理，客户端因此既不能准备，也不能中途加入。现在不再摘除：联机房间内只要 Together 带有 `CharacterSelectWait`，`StartRun` 就整个放行给 Together，主机开新局也随之改走 Together 的准备大厅。

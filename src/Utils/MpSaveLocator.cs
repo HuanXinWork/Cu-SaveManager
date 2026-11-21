@@ -23,22 +23,55 @@ namespace CasualtiesUnknown.SaveManager
         internal static bool IsMultiplayerSaveActive()
             => MultiplayerBridge.IsMultiplayerRunning();
 
-        /// <summary>将 mp_save 目录打包写入目标路径；异常时清理残留文件。</summary>
+        /// <summary>启动或回档前检测：若 mp_save 不存在但存在上次回档中断残留的 mp_save.old，则自动将其恢复为 mp_save。</summary>
+        internal static void RecoverInterruptedRestoreIfNeeded()
+        {
+            string previous = MpSaveDir + ".old";
+            if (!Directory.Exists(MpSaveDir) && Directory.Exists(previous))
+            {
+                try
+                {
+                    Directory.Move(previous, MpSaveDir);
+                    ModLog.Warning("多人存档：检测到上次回档中断残留，已将原 mp_save 从 .old 自动恢复");
+                }
+                catch (Exception recoverError)
+                {
+                    ModLog.Warning($"多人存档：无法恢复中断残留的 mp_save（{previous}）：{recoverError.Message}");
+                }
+            }
+        }
+
+        /// <summary>将 mp_save 目录快速打包写入目标路径；若目标原本存在则保护原文件不被失败过程误删。</summary>
         internal static void PackMpSaveTo(string destZipPath)
         {
             if (!HasMpSave()) throw new FileNotFoundException("没有可打包的多人存档 mp_save");
-            string tmp = destZipPath + ".tmp";
+            bool existedBefore = File.Exists(destZipPath);
+            string tmp = destZipPath + ".tmp." + Guid.NewGuid().ToString("N");
             try
             {
                 if (File.Exists(tmp)) File.Delete(tmp);
-                ZipFile.CreateFromDirectory(MpSaveDir, tmp, System.IO.Compression.CompressionLevel.Optimal, includeBaseDirectory: false);
-                if (File.Exists(destZipPath)) File.Delete(destZipPath);
+                ZipFile.CreateFromDirectory(MpSaveDir, tmp, System.IO.Compression.CompressionLevel.Fastest, includeBaseDirectory: false);
+                if (File.Exists(destZipPath))
+                {
+                    try
+                    {
+                        File.Replace(tmp, destZipPath, null);
+                        return;
+                    }
+                    catch
+                    {
+                        File.Delete(destZipPath);
+                    }
+                }
                 File.Move(tmp, destZipPath);
             }
             catch
             {
                 try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
-                try { if (File.Exists(destZipPath)) File.Delete(destZipPath); } catch { }
+                if (!existedBefore)
+                {
+                    try { if (File.Exists(destZipPath)) File.Delete(destZipPath); } catch { }
+                }
                 throw;
             }
         }
@@ -102,41 +135,82 @@ namespace CasualtiesUnknown.SaveManager
             return result;
         }
 
+        /// <summary>以只读文件流打开多人槽位 zip 提取 RunId（优先读 mp_rules.json，避免将整包加载进内存）。</summary>
+        internal static int ReadRunIdFromZipFile(string zipPath)
+        {
+            if (string.IsNullOrEmpty(zipPath) || !File.Exists(zipPath)) return 0;
+            using (var zip = ZipFile.OpenRead(zipPath))
+            {
+                return ReadRunIdFromArchive(zip);
+            }
+        }
+
         /// <summary>从打包的多人槽位 zip 字节流提取 RunId（优先读包内 mp_rules.json，未果再读玩家 save.sv 的 cId）。</summary>
         internal static int ReadRunIdFromZipBytes(byte[] zipBytes)
         {
+            if (zipBytes == null || zipBytes.Length == 0) return 0;
             using (var ms = new MemoryStream(zipBytes))
             using (var zip = new ZipArchive(ms, ZipArchiveMode.Read))
             {
-                foreach (var entry in zip.Entries)
-                {
-                    if (!string.Equals(Path.GetFileName(entry.FullName), MpRulesFile, StringComparison.OrdinalIgnoreCase))
-                        continue;
-                    using (var reader = new StreamReader(entry.Open(), System.Text.Encoding.UTF8))
-                    {
-                        int rid = MpRulesJson.ParseRunId(reader.ReadToEnd());
-                        if (rid != 0) return rid;
-                    }
-                }
+                return ReadRunIdFromArchive(zip);
+            }
+        }
 
-                foreach (var entry in zip.Entries)
+        private static int ReadRunIdFromArchive(ZipArchive zip)
+        {
+            foreach (var entry in zip.Entries)
+            {
+                if (!string.Equals(Path.GetFileName(entry.FullName), MpRulesFile, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                using (var reader = new StreamReader(entry.Open(), System.Text.Encoding.UTF8))
                 {
-                    if (!entry.FullName.EndsWith(".sv", StringComparison.OrdinalIgnoreCase)) continue;
-                    using (var es = entry.Open())
-                    using (var buf = new MemoryStream())
+                    int rid = MpRulesJson.ParseRunId(reader.ReadToEnd());
+                    if (rid != 0) return rid;
+                }
+            }
+
+            foreach (var entry in zip.Entries)
+            {
+                if (!entry.FullName.EndsWith(".sv", StringComparison.OrdinalIgnoreCase)) continue;
+                using (var es = entry.Open())
+                using (var buf = new MemoryStream())
+                {
+                    es.CopyTo(buf);
+                    byte[] inner = buf.ToArray();
+                    if (inner.Length < 2) continue;
+                    string json = SaveSystem.Unzip(inner);
+                    if (!string.IsNullOrEmpty(json) && TopJson.TryReadInt(json, "cId", out int cid) && cid != 0)
                     {
-                        es.CopyTo(buf);
-                        byte[] inner = buf.ToArray();
-                        if (inner.Length < 2) continue;
-                        string json = SaveSystem.Unzip(inner);
-                        if (!string.IsNullOrEmpty(json) && TopJson.TryReadInt(json, "cId", out int cid) && cid != 0)
-                        {
-                            return cid;
-                        }
+                        return cid;
                     }
                 }
             }
             return 0;
+        }
+
+        /// <summary>校验 zip 条目不包含路径穿越 ".." 或越出目标目录的非法路径。</summary>
+        private static void EnsureZipEntriesSafe(string srcZipPath, string stagingDir)
+        {
+            string fullRoot = Path.GetFullPath(stagingDir)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+            using (var zip = ZipFile.OpenRead(srcZipPath))
+            {
+                foreach (var entry in zip.Entries)
+                {
+                    string entryName = entry.FullName;
+                    if (string.IsNullOrEmpty(entryName)) continue;
+                    if (entryName.IndexOf("..", StringComparison.Ordinal) >= 0)
+                    {
+                        throw new InvalidDataException($"多人槽位压缩包含非法路径穿越条目：{entryName}");
+                    }
+                    string targetPath = Path.GetFullPath(Path.Combine(fullRoot, entryName));
+                    if (!targetPath.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidDataException($"多人槽位压缩包含越界路径条目：{entryName}");
+                    }
+                }
+            }
         }
 
         /// <summary>先解包到暂存目录并执行可选改写，成功后原子替换 mp_save；中途失败时恢复原 mp_save。</summary>
@@ -144,18 +218,7 @@ namespace CasualtiesUnknown.SaveManager
         {
             string staging = MpSaveStagingDir;
             string previous = MpSaveDir + ".old";
-            if (Directory.Exists(previous) && !Directory.Exists(MpSaveDir))
-            {
-                try
-                {
-                    Directory.Move(previous, MpSaveDir);
-                    ModLog.Warning("多人回档：检测到上次回档中断，已将原 mp_save 从 .old 恢复");
-                }
-                catch (Exception recoverError)
-                {
-                    ModLog.Warning($"多人回档：无法恢复上次中断的 mp_save（{previous}）：{recoverError.Message}");
-                }
-            }
+            RecoverInterruptedRestoreIfNeeded();
             if (Directory.Exists(staging))
             {
                 try { Directory.Delete(staging, recursive: true); }
@@ -172,6 +235,7 @@ namespace CasualtiesUnknown.SaveManager
                     Directory.Exists(staging) ? staging : previous));
             }
 
+            EnsureZipEntriesSafe(srcZipPath, staging);
             Directory.CreateDirectory(staging);
             bool movedAside = false;
             try

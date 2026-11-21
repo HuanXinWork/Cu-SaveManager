@@ -39,13 +39,13 @@ namespace CasualtiesUnknown.SaveManager
         private static void Prefix(Container __instance)
         {
             if (!SaveLoadWindowPatch.Active || __instance == null) return;
+            MethodInfo apply = ResolveApplyMethod();
+            if (apply == null) return;
             try
             {
                 if (!_applied.Add(__instance.GetInstanceID())) return;
                 var item = __instance.GetComponent<Item>();
                 if (item == null || string.IsNullOrEmpty(item.id)) return;
-                MethodInfo apply = ResolveApplyMethod();
-                if (apply == null) return;
                 apply.Invoke(null, new object[] { item, false });
             }
             catch (Exception ex)
@@ -58,16 +58,23 @@ namespace CasualtiesUnknown.SaveManager
         {
             if (_resolveTried) return _applyCustomItemRuntime;
             _resolveTried = true;
-            Type type = AccessTools.TypeByName("CUCoreLib.Patches.ItemRegistryPatches");
-            if (type != null)
+            try
             {
-                _applyCustomItemRuntime = AccessTools.Method(
-                    type,
-                    "ApplyCustomItemRuntime",
-                    new[] { typeof(Item), typeof(bool) });
+                Type type = AccessTools.TypeByName("CUCoreLib.Patches.ItemRegistryPatches");
+                if (type != null)
+                {
+                    _applyCustomItemRuntime = AccessTools.Method(
+                        type,
+                        "ApplyCustomItemRuntime",
+                        new[] { typeof(Item), typeof(bool) });
+                }
+            }
+            catch (Exception ex)
+            {
+                ModLog.Warning($"解析 CUCoreLib ApplyCustomItemRuntime 异常：{ex.Message}");
             }
             if (_applyCustomItemRuntime == null)
-                ModLog.Info("CUCoreLib ApplyCustomItemRuntime 不可用，读档自定义容器容量兜底未启用");
+                ModLog.Debug("CUCoreLib ApplyCustomItemRuntime 不可用，读档自定义容器容量兜底未启用");
             return _applyCustomItemRuntime;
         }
     }

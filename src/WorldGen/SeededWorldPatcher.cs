@@ -120,49 +120,53 @@ namespace CasualtiesUnknown.SaveManager
         private static bool On => SeededWorldEngine.IsActive
             && (!MultiplayerBridge.IsMultiplayerRunning() || SeededWorldEngine.MpReseedEnabled);
 
+        internal static void TryPatch() => TryPatch(HarmonyBootstrap.Instance);
+
         internal static void TryPatch(Harmony harmony)
         {
-            if (_patched || harmony == null) return;
+            if (_patched) return;
+            harmony = harmony ?? HarmonyBootstrap.Instance;
             try
             {
                 var t = typeof(SeededWorldPatcher);
                 bool ok = true;
 
-                ok &= Patch(harmony, "Start", Pre(t, nameof(Start_Prefix)));
+                ok &= Patch(harmony, "Start", HM(t, nameof(Start_Prefix)));
 
-                var coPostfix = Post(t, nameof(CoroutinePhase_Postfix));
+                var coPostfix = HM(t, nameof(CoroutinePhase_Postfix));
                 foreach (var stage in CoroutinePhases)
                 {
                     ok &= Patch(harmony, stage.method, null, coPostfix);
                 }
 
-                var syncPrefix = Pre(t, nameof(SyncPhase_Prefix));
-                var scopeFinalizer = Fin(t, nameof(Scope_Finalizer));
+                var syncPrefix = HM(t, nameof(SyncPhase_Prefix));
+                var scopeFinalizer = HM(t, nameof(Scope_Finalizer));
                 foreach (var stage in SyncPhases)
                 {
                     ok &= Patch(harmony, stage.method, syncPrefix, null, scopeFinalizer);
                 }
 
-                ok &= Patch(harmony, "GenerateTree", Pre(t, nameof(GenerateTree_Prefix)), null, scopeFinalizer);
-                ok &= Patch(harmony, "GenerateBigMushroom", Pre(t, nameof(GenerateBigMushroom_Prefix)), null, scopeFinalizer);
-                ok &= Patch(harmony, "DistributeEntities", Pre(t, nameof(DistributeEntities_Prefix)), null, scopeFinalizer);
-                ok &= Patch(harmony, "PlaceLiquids", Pre(t, nameof(PlaceLiquids_Prefix)), null, scopeFinalizer);
-                ok &= Patch(harmony, "GenerateLifePods", Pre(t, nameof(GenerateLifePods_Prefix)), null, scopeFinalizer);
-                ok &= Patch(harmony, "GenerateDropCapsules", Pre(t, nameof(GenerateDropCapsules_Prefix)), null, scopeFinalizer);
-                ok &= Patch(harmony, "GenerateCollapsedPods", Pre(t, nameof(GenerateCollapsedPods_Prefix)), null, scopeFinalizer);
+                ok &= Patch(harmony, "GenerateTree", HM(t, nameof(GenerateTree_Prefix)), null, scopeFinalizer);
+                ok &= Patch(harmony, "GenerateBigMushroom", HM(t, nameof(GenerateBigMushroom_Prefix)), null, scopeFinalizer);
+                ok &= Patch(harmony, "DistributeEntities", HM(t, nameof(DistributeEntities_Prefix)), null, scopeFinalizer);
+                ok &= Patch(harmony, "PlaceLiquids", HM(t, nameof(PlaceLiquids_Prefix)), null, scopeFinalizer);
+                ok &= Patch(harmony, "GenerateLifePods", HM(t, nameof(GenerateLifePods_Prefix)), null, scopeFinalizer);
+                ok &= Patch(harmony, "GenerateDropCapsules", HM(t, nameof(GenerateDropCapsules_Prefix)), null, scopeFinalizer);
+                ok &= Patch(harmony, "GenerateCollapsedPods", HM(t, nameof(GenerateCollapsedPods_Prefix)), null, scopeFinalizer);
                 // 读档或回档时原方法由 ApplyLayerModifiersRestorePatch 接管跳过，仅新开局进入本随机作用域。
-                ok &= Patch(harmony, "ApplyLayerModifiers", Pre(t, nameof(ApplyLayerModifiers_Prefix)), null, scopeFinalizer);
+                ok &= Patch(harmony, "ApplyLayerModifiers", HM(t, nameof(ApplyLayerModifiers_Prefix)), null, scopeFinalizer);
 
-                ok &= Patch(harmony, "ContinueRun", Pre(t, nameof(ContinueRun_Prefix)), null, scopeFinalizer);
-                ok &= Patch(harmony, "RegenerateWorld", Pre(t, nameof(ResetCounters_Prefix)));
-                ok &= Patch(harmony, "Clear", null, Post(t, nameof(Clear_Postfix)));
+                ok &= Patch(harmony, "ContinueRun", HM(t, nameof(ContinueRun_Prefix)), null, scopeFinalizer);
+                ok &= Patch(harmony, "RegenerateWorld", HM(t, nameof(ResetCounters_Prefix)));
+                ok &= Patch(harmony, "Clear", null, HM(t, nameof(Clear_Postfix)));
 
                 ok &= PatchFastNoiseCtor(harmony, t);
 
+                // 有意将商人货架与容器开箱随机性绑定至层种子与坐标，确保回档后同层交互结果一致、防止反复回档刷物。
                 ok &= PatchExternal(harmony, typeof(TraderScript), "GenerateInventory",
-                    Pre(t, nameof(Trader_GenerateInv_Prefix)), scopeFinalizer);
+                    HM(t, nameof(Trader_GenerateInv_Prefix)), scopeFinalizer);
                 ok &= PatchExternal(harmony, typeof(Openable), "OnUse",
-                    Pre(t, nameof(Openable_OnUse_Prefix)), scopeFinalizer);
+                    HM(t, nameof(Openable_OnUse_Prefix)), scopeFinalizer);
 
                 _patched = ok;
                 ModLog.Debug($"世界引擎 patch 汇总：已挂载 {PatchedTargets.Count} 个挂载点，本次全部成功={ok}");
@@ -181,62 +185,80 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        private static HarmonyMethod Pre(Type t, string name)
-            => new HarmonyMethod(t.GetMethod(name, BindingFlags.Static | BindingFlags.NonPublic));
-
-        private static HarmonyMethod Post(Type t, string name)
-            => new HarmonyMethod(t.GetMethod(name, BindingFlags.Static | BindingFlags.NonPublic));
-
-        private static HarmonyMethod Fin(Type t, string name)
+        private static HarmonyMethod HM(Type t, string name)
             => new HarmonyMethod(t.GetMethod(name, BindingFlags.Static | BindingFlags.NonPublic));
 
         private static bool Patch(Harmony harmony, string method, HarmonyMethod prefix,
             HarmonyMethod postfix = null, HarmonyMethod finalizer = null)
         {
-            var mi = AccessTools.Method(typeof(WorldGeneration), method);
-            if (mi == null)
+            try
             {
-                InteropDiagnostics.WarnOnce("SeededWorldPatcher." + method, $"世界引擎 patch 跳过：WorldGeneration.{method} 未找到");
-                ModLog.Debug($"挂载点 WorldGeneration.{method}：失败（方法未找到）");
+                var mi = AccessTools.Method(typeof(WorldGeneration), method);
+                if (mi == null)
+                {
+                    InteropDiagnostics.WarnOnce("SeededWorldPatcher." + method, $"世界引擎 patch 跳过：WorldGeneration.{method} 未找到");
+                    ModLog.Debug($"挂载点 WorldGeneration.{method}：失败（方法未找到）");
+                    return false;
+                }
+
+                return PatchTarget(harmony, mi, prefix, postfix, finalizer);
+            }
+            catch (Exception ex)
+            {
+                ModLog.Warning($"世界引擎挂载点 WorldGeneration.{method} 失败：{ex.Message}");
                 return false;
             }
-
-            return PatchTarget(harmony, mi, prefix, postfix, finalizer);
         }
 
         private static bool PatchExternal(Harmony harmony, Type type, string method,
             HarmonyMethod prefix, HarmonyMethod finalizer)
         {
-            var mi = AccessTools.Method(type, method);
-            if (mi == null)
+            try
             {
-                InteropDiagnostics.WarnOnce("SeededWorldPatcher." + method, $"战利品确定化 patch 跳过：{type?.Name}.{method} 未找到");
-                ModLog.Debug($"挂载点 {type?.Name}.{method}：失败（方法未找到）");
+                var mi = AccessTools.Method(type, method);
+                if (mi == null)
+                {
+                    InteropDiagnostics.WarnOnce("SeededWorldPatcher." + method, $"战利品确定化 patch 跳过：{type?.Name}.{method} 未找到");
+                    ModLog.Debug($"挂载点 {type?.Name}.{method}：失败（方法未找到）");
+                    return false;
+                }
+
+                return PatchTarget(harmony, mi, prefix, null, finalizer);
+            }
+            catch (Exception ex)
+            {
+                ModLog.Warning($"战利品确定化挂载点 {type?.Name}.{method} 失败：{ex.Message}");
                 return false;
             }
-
-            return PatchTarget(harmony, mi, prefix, null, finalizer);
         }
 
         private static bool PatchFastNoiseCtor(Harmony harmony, Type t)
         {
-            var fn = AccessTools.TypeByName("FastNoiseLite");
-            if (fn == null)
+            try
             {
-                InteropDiagnostics.WarnOnce("SeededWorldPatcher.FastNoiseLite", "FastNoiseLite 类型未找到，噪声确定化跳过");
-                ModLog.Debug("挂载点 FastNoiseLite(int) 构造：失败（类型未找到）");
+                var fn = AccessTools.TypeByName("FastNoiseLite");
+                if (fn == null)
+                {
+                    InteropDiagnostics.WarnOnce("SeededWorldPatcher.FastNoiseLite", "FastNoiseLite 类型未找到，噪声确定化跳过");
+                    ModLog.Debug("挂载点 FastNoiseLite(int) 构造：失败（类型未找到）");
+                    return false;
+                }
+
+                var ctor = AccessTools.Constructor(fn, new[] { typeof(int) });
+                if (ctor == null)
+                {
+                    InteropDiagnostics.WarnOnce("SeededWorldPatcher.FastNoiseCtor", "FastNoiseLite(int) 构造未找到，噪声确定化跳过");
+                    ModLog.Debug("挂载点 FastNoiseLite(int) 构造：失败（构造函数未找到）");
+                    return false;
+                }
+
+                return PatchTarget(harmony, ctor, HM(t, nameof(FastNoiseCtor_Prefix)), null, null);
+            }
+            catch (Exception ex)
+            {
+                ModLog.Warning($"噪声确定化挂载点 FastNoiseLite(int) 失败：{ex.Message}");
                 return false;
             }
-
-            var ctor = AccessTools.Constructor(fn, new[] { typeof(int) });
-            if (ctor == null)
-            {
-                InteropDiagnostics.WarnOnce("SeededWorldPatcher.FastNoiseCtor", "FastNoiseLite(int) 构造未找到，噪声确定化跳过");
-                ModLog.Debug("挂载点 FastNoiseLite(int) 构造：失败（构造函数未找到）");
-                return false;
-            }
-
-            return PatchTarget(harmony, ctor, Pre(t, nameof(FastNoiseCtor_Prefix)), null, null);
         }
 
         private static bool PatchTarget(Harmony harmony, MethodBase target,
@@ -309,6 +331,7 @@ namespace CasualtiesUnknown.SaveManager
         private static void Start_Prefix()
         {
             ResetGenerationCounters();
+            SeededWorldEngine.InvalidateLayerCache();
             TogetherModHooksBridge.TryBindAll();
             QolSpawnSuppressor.TryPatch();
             QolTrapClearGuard.TryPatch();
@@ -417,6 +440,7 @@ namespace CasualtiesUnknown.SaveManager
 
         private static void ContinueRun_Prefix(out RngScope __state)
         {
+            SeededWorldEngine.InvalidateLayerCache();
             __state = default;
             if (On)
             {
@@ -428,6 +452,7 @@ namespace CasualtiesUnknown.SaveManager
 
         private static void ResetCounters_Prefix()
         {
+            SeededWorldEngine.InvalidateLayerCache();
             if (On)
             {
                 ResetGenerationCounters();
@@ -436,6 +461,7 @@ namespace CasualtiesUnknown.SaveManager
 
         private static void Clear_Postfix()
         {
+            SeededWorldEngine.InvalidateLayerCache();
             if (On)
             {
                 ResetGenerationCounters();

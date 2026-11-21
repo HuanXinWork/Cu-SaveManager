@@ -15,7 +15,7 @@ namespace CasualtiesUnknown.SaveManager
         {
             if (QolBridge.IsAutosaveInProgress()) return;
             if (MultiplayerBridge.IsMultiplayerRunning() && !MultiplayerBridge.IsServer()) return;
-            try { new SaveStore().PersistCurrentSaveForContinue(); }
+            try { (Plugin.SharedStore ?? new SaveStore()).PersistCurrentSaveForContinue(); }
             catch (Exception ex) { ModLog.Warning($"SaveGamePersistPositionPatch 失败：{ex.Message}"); }
         }
     }
@@ -35,7 +35,7 @@ namespace CasualtiesUnknown.SaveManager
             try
             {
                 if (ShouldPersistCurrentSave())
-                    new SaveStore().PersistCurrentSaveForContinue();
+                    (Plugin.SharedStore ?? new SaveStore()).PersistCurrentSaveForContinue();
             }
             catch (Exception ex)
             {
@@ -49,8 +49,8 @@ namespace CasualtiesUnknown.SaveManager
                     SeededWorldEngine.Deactivate();
                 }
                 SaveStore.InvalidateRunIdCache();
-                IntroLifepodOnLoadGuardPatch.PendingSkipIntroLifepod = false;
-                ApplyLayerModifiersRestorePatch.PendingIndex = -2;
+                PendingLoadContext.ClearAll();
+                QolBridge.RestoreInitialAutosaveState();
                 MpPositionRestorer.CancelSession();
             }
         }

@@ -43,10 +43,27 @@ namespace CasualtiesUnknown.SaveManager
                     return;
                 }
 
-                Harmony harmony = new Harmony("com.casualtiesUnknown.saveManager.mpWorldSeed");
-                HarmonyMethod prefix = new HarmonyMethod(typeof(MpWorldSeedInjector).GetMethod(
-                    nameof(CtorPrefix), BindingFlags.Static | BindingFlags.NonPublic));
-                harmony.Patch(ctor, prefix);
+                Harmony harmony = HarmonyBootstrap.Instance;
+                Patches info = Harmony.GetPatchInfo(ctor);
+                bool exists = false;
+                if (info?.Prefixes != null)
+                {
+                    foreach (Patch p in info.Prefixes)
+                    {
+                        if (p.owner == harmony.Id && p.PatchMethod?.Name == nameof(CtorPrefix))
+                        {
+                            exists = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!exists)
+                {
+                    HarmonyMethod prefix = new HarmonyMethod(typeof(MpWorldSeedInjector).GetMethod(
+                        nameof(CtorPrefix), BindingFlags.Static | BindingFlags.NonPublic));
+                    harmony.Patch(ctor, prefix);
+                }
                 _patched = true;
                 ModLog.Info("多人固定世界注入已挂载（Together.LastBeforeGenerationState..ctor）");
                 ModLog.Debug("多人世界种子注入：挂载成功 " + ctor.DeclaringType?.FullName + "..ctor()");
@@ -88,7 +105,7 @@ namespace CasualtiesUnknown.SaveManager
             catch { }
 
             int traveled = Math.Max(diskTraveled, memTraveled);
-            int seed = SeededWorldEngine.CurrentSeed + traveled * 265443576;
+            int seed = SeededWorldEngine.CurrentSeed + traveled * SeededWorldEngine.LayerSeedStep;
             UnityEngine.Random.InitState(seed);
             ModLog.Info($"多人世界种子注入：seed={seed} totalTraveled={traveled}（disk={diskTraveled} mem={memTraveled}）");
         }

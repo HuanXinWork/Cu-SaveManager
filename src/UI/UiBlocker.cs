@@ -74,15 +74,23 @@ namespace CasualtiesUnknown.SaveManager
                 for (int i = 0; i < _disabled.Count; i++)
                 {
                     var (gr, was) = _disabled[i];
-                    if (gr != null) gr.enabled = was;
+                    try
+                    {
+                        if (gr != null) gr.enabled = was;
+                    }
+                    catch { }
                 }
-                _disabled.Clear();
-                _tracked.Clear();
-                _isBlocking = false;
             }
             catch (System.Exception ex)
             {
                 ModLog.Warning($"UiBlocker.Unblock 失败：{ex.Message}");
+            }
+            finally
+            {
+                // 确保任何异常下均释放阻塞态并清空受管集合，防止全屏射线被永久锁死。
+                _disabled.Clear();
+                _tracked.Clear();
+                _isBlocking = false;
             }
         }
 

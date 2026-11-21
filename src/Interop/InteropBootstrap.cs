@@ -11,12 +11,8 @@ namespace CasualtiesUnknown.SaveManager.Interop
     /// <summary>管理互操作登记表与目标模组提供方单例，首次初始化时输出一次自检摘要。</summary>
     internal static class InteropBootstrap
     {
-        private const InteropCapability RequiredCapabilities =
-            InteropCapability.Session
-            | InteropCapability.Roster
-            | InteropCapability.TypeRegistry
-            | InteropCapability.MemberAccess
-            | InteropCapability.WorldGenHook;
+        // 所对接外部模组均为可选软依赖，不将缺失项记入启动告警。
+        private const InteropCapability RequiredCapabilities = InteropCapability.None;
 
         private static readonly object Sync = new object();
 
@@ -24,6 +20,12 @@ namespace CasualtiesUnknown.SaveManager.Interop
         private static TogetherProvider _together;
         private static QolProvider _qol;
         private static LayerUnlockProvider _layerUnlock;
+
+        /// <summary>所有 BepInEx 插件 Awake 是否已完成；为 true 后未检出的可选模组可缓存负向结果。</summary>
+        internal static bool PluginScanComplete { get; private set; }
+
+        /// <summary>标记插件加载阶段已结束，允许各提供方缓存“目标模组未安装”结论以消除后续重复扫描。</summary>
+        internal static void MarkPluginScanComplete() => PluginScanComplete = true;
 
         /// <summary>首次调用时创建登记表、注册提供方并输出自检摘要；后续调用返回同一实例。</summary>
         internal static IInteropRegistry Initialize()
@@ -87,9 +89,6 @@ namespace CasualtiesUnknown.SaveManager.Interop
             }
         }
 #endif
-
-        /// <summary>已初始化的登记表；未初始化时返回空实现。</summary>
-        internal static IInteropRegistry Current => _registry ?? NullInteropRegistry.Instance;
 
         /// <summary>Casualties: Together 提供方。</summary>
         internal static TogetherProvider Together

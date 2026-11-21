@@ -2,17 +2,15 @@ using System;
 using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
-using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>在主菜单 PreRunScript 下注入 uGUI“存档管理”按钮，并统一托管运行期 Harmony 补丁。</summary>
+    /// <summary>在主菜单 PreRunScript 下注入 uGUI“存档管理”按钮，并在语言切换或卸载时同步更新与清理。</summary>
     internal static class MenuButtonUiInjector
     {
         private const string InjectedName = "SaveManager_MenuButton";
         private static Action _onClick;
-        private static Harmony _harmony;
         private static GameObject _injectedButton;
 
         /// <summary>注入按钮的 RectTransform，供 PreRunGuardPatch 拦截下层 AdaptiveButton 悬停穿透。</summary>
@@ -21,77 +19,16 @@ namespace CasualtiesUnknown.SaveManager
         internal static void Setup(Action onClick)
         {
             _onClick = onClick;
-            try
-            {
-                _harmony = new Harmony("com.casualtiesUnknown.saveManager.menuButton");
-                _harmony.PatchAll(typeof(MenuButtonUiInjector).Assembly);
-            }
-            catch (Exception ex)
-            {
-                ModLog.Warning($"Harmony PatchAll 失败：{ex.Message}");
-            }
-
-            try
-            {
-                SeededWorldPatcher.TryPatch(_harmony);
-            }
-            catch (Exception ex)
-            {
-                ModLog.Warning($"SeededWorldPatcher.TryPatch 失败：{ex.Message}");
-            }
-
-            try
-            {
-                LoadRunPrefixReplacer.TryPatch(_harmony);
-            }
-            catch (Exception ex)
-            {
-                ModLog.Warning($"LoadRunPrefixReplacer.TryPatch 失败：{ex.Message}");
-            }
-
-            try
-            {
-                MpCharacterRestore.TryPatch(_harmony);
-            }
-            catch (Exception ex)
-            {
-                ModLog.Warning($"MpCharacterRestore.TryPatch 失败：{ex.Message}");
-            }
-
-            SceneManager.sceneLoaded += OnSceneLoaded;
         }
 
-        private static readonly string[] AuxiliaryHarmonyIds =
-        {
-            "com.casualtiesUnknown.saveManager.mpCharacter",
-            "com.casualtiesUnknown.saveManager.layerUnlockSeed",
-            "com.casualtiesUnknown.saveManager.mpLateSpawnSuppressor",
-            "com.casualtiesUnknown.saveManager.mpSeedBroadcast",
-            "com.casualtiesUnknown.saveManager.mpWorldSeed",
-            "com.casualtiesUnknown.saveManager.qolSpawnSuppressor",
-            "com.casualtiesUnknown.saveManager.qolTrapClearGuard",
-        };
-
-        /// <summary>卸载场景事件监听并移除本模组全部 Harmony 实例挂载的补丁。</summary>
+        /// <summary>销毁已注入的主菜单按钮对象并清空回调引用。</summary>
         internal static void Dispose()
         {
-            try { SceneManager.sceneLoaded -= OnSceneLoaded; } catch { }
-            try { _harmony?.UnpatchSelf(); } catch { }
-            _harmony = null;
-            for (int i = 0; i < AuxiliaryHarmonyIds.Length; i++)
+            if (_injectedButton != null)
             {
-                try { Harmony.UnpatchID(AuxiliaryHarmonyIds[i]); } catch { }
+                try { UnityEngine.Object.Destroy(_injectedButton); } catch { }
             }
-            MpCharacterRestore.ResetPatchState();
-            ApplyLayerModifiersRestorePatch.ResetPatchState();
-            SeededWorldPatcher.ResetPatchState();
-            LayerUnlockSeedPatcher.ResetPatchState();
-            MpLateSpawnSuppressor.ResetPatchState();
-            MpSeedBroadcast.ResetPatchState();
-            MpWorldSeedInjector.ResetPatchState();
-            QolSpawnSuppressor.ResetPatchState();
-            QolTrapClearGuard.ResetPatchState();
-            TogetherModHooksBridge.Dispose();
+            _onClick = null;
             _injectedButton = null;
             InjectedRect = null;
         }
@@ -105,23 +42,11 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        private static void OnSceneLoaded(Scene scene, LoadSceneMode mode)
-        {
-            if (scene.name != "PreGen" || PreRunScript.instance == null) return;
-            try { InjectOnce(PreRunScript.instance); }
-            catch (Exception ex) { ModLog.Warning($"sceneLoaded 注入失败：{ex.Message}"); }
-        }
-
-        /// <summary>在 PreRunScript.Start 完成后补齐延迟补丁并注入主菜单按钮。</summary>
+        /// <summary>在 PreRunScript.Start 完成后注入主菜单按钮。</summary>
         internal static void OnPreRunScriptStarted(PreRunScript pre)
         {
             try
             {
-                SeededWorldPatcher.TryPatch(_harmony);
-                LoadRunPrefixReplacer.TryPatch(_harmony);
-                MpCharacterRestore.TryPatch(_harmony);
-                MpWorldSeedInjector.TryPatch();
-                MpSeedBroadcast.TryPatch();
                 InjectOnce(pre);
             }
             catch (Exception ex)
@@ -138,7 +63,7 @@ namespace CasualtiesUnknown.SaveManager
                 return;
             }
 
-            // loadButton 位于默认隐藏的 runSettingsScreen 下，必须直接挂到 PreRunScript 根节点
+            // loadButton 位于默认隐藏的 runSettingsScreen 下，必须直接挂到 PreRunScript 根节点。
             var parent = pre.transform;
             for (int i = 0; i < parent.childCount; i++)
             {
@@ -172,7 +97,6 @@ namespace CasualtiesUnknown.SaveManager
             DestroyLocalizers(clone);
             CleanupLoadButtonChildren(clone);
             ReplaceAllTexts(clone, I18n.T("app.menu_button"));
-            clone.AddComponent<MenuButtonLabelSync>();
 
             var rt = clone.GetComponent<RectTransform>();
             if (rt != null)
@@ -311,29 +235,6 @@ namespace CasualtiesUnknown.SaveManager
                     first = false;
                 }
                 catch { }
-            }
-        }
-
-        private sealed class MenuButtonLabelSync : MonoBehaviour
-        {
-            private string _appliedText;
-            private float _nextCheckAt;
-
-            private void OnEnable() => SyncNow();
-
-            private void Update()
-            {
-                if (Time.unscaledTime < _nextCheckAt) return;
-                _nextCheckAt = Time.unscaledTime + 0.5f;
-                SyncNow();
-            }
-
-            private void SyncNow()
-            {
-                string expected = I18n.T("app.menu_button");
-                if (expected == _appliedText) return;
-                _appliedText = expected;
-                ReplaceAllTexts(gameObject, expected);
             }
         }
     }

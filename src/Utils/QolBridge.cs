@@ -91,9 +91,9 @@ namespace CasualtiesUnknown.SaveManager
                     return;
                 }
 
-                int seed = Guid.NewGuid().GetHashCode();
+                int seed = Environment.TickCount ^ Guid.NewGuid().GetHashCode();
                 if (seed == 0) seed = 1;
-                Provider.TryWriteSeed(true, seed, seed.ToString());
+                Provider.TryWriteSeed(true, seed, seed.ToString(System.Globalization.CultureInfo.InvariantCulture));
                 ModLog.Info($"QoL 模式新开局已设确定种子 seed={seed}（原 seeded={seeded} current={current}）");
             }
             catch (Exception ex)
@@ -102,11 +102,17 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        /// <summary>读取 QoL 实时种子；为 0 时按当前模式回退读取同模式存档的 sidecar 种子。</summary>
+        /// <summary>读取 QoL 实时种子（仅当 IsSeeded 为真且种子非 0 时有效）；无效时回退读取同模式当前存档的 sidecar 种子。</summary>
         internal static void ReadCurrentSeed(out int seed, out string input)
         {
-            Provider.TryReadSeed(out bool _, out seed, out input);
-            if (seed != 0) return;
+            if (Provider.TryReadSeed(out bool seeded, out int rawSeed, out string rawInput) && seeded && rawSeed != 0)
+            {
+                seed = rawSeed;
+                input = rawInput ?? string.Empty;
+                return;
+            }
+            seed = 0;
+            input = string.Empty;
 
             try
             {
@@ -118,7 +124,7 @@ namespace CasualtiesUnknown.SaveManager
                 if (sc != null && sc.QolSeed != 0)
                 {
                     seed = sc.QolSeed;
-                    input = string.IsNullOrEmpty(input) ? (sc.QolSeedInput ?? "") : input;
+                    input = sc.QolSeedInput ?? string.Empty;
                 }
             }
             catch { }
@@ -130,21 +136,25 @@ namespace CasualtiesUnknown.SaveManager
             try
             {
                 if (string.IsNullOrEmpty(fullPath) || !File.Exists(fullPath)) return 0;
-                byte[] bytes = File.ReadAllBytes(fullPath);
-                if (bytes == null || bytes.Length == 0) return 0;
-                uint h = 2166136261u;
-                for (int i = 0; i < bytes.Length; i++)
-                {
-                    h ^= bytes[i];
-                    h *= 16777619u;
-                }
-                int v = (int)h;
-                return v == 0 ? 1 : v;
+                return ComputeDeterministicSeedFromBytes(File.ReadAllBytes(fullPath));
             }
             catch
             {
                 return 0;
             }
+        }
+
+        internal static int ComputeDeterministicSeedFromBytes(byte[] bytes)
+        {
+            if (bytes == null || bytes.Length == 0) return 0;
+            uint h = 2166136261u;
+            for (int i = 0; i < bytes.Length; i++)
+            {
+                h ^= bytes[i];
+                h *= 16777619u;
+            }
+            int v = (int)h;
+            return v == 0 ? 1 : v;
         }
 
         /// <summary>返回当前种子的来源诊断描述。</summary>
@@ -233,9 +243,41 @@ namespace CasualtiesUnknown.SaveManager
 
         internal static void ClearPendingLoadPosition()
         {
-            if (((IInteropTypeRegistry)Provider).TryResolveType("QoL_Unknown.SaveSystemPatcher", out Type patcherType))
+            try
             {
-                ((IInteropMemberAccess)Provider).TryWriteStatic(patcherType, "PendingLoadPosition", null);
+                InteropBootstrap.Qol.ClearPendingLoadPosition();
+            }
+            catch (Exception ex)
+            {
+                ModLog.Warning($"QolBridge.ClearPendingLoadPosition 失败：{ex.Message}");
+            }
+        }
+
+        /// <summary>退回主菜单时将 QoL 自动存档开关恢复至本模组首次介入前的初始状态。</summary>
+        internal static void RestoreInitialAutosaveState()
+        {
+            try
+            {
+                InteropBootstrap.Qol.RestoreInitialAutosaveState();
+            }
+            catch (Exception ex)
+            {
+                ModLog.Warning($"QolBridge.RestoreInitialAutosaveState 失败：{ex.Message}");
+            }
+        }
+
+        /// <summary>按 0-based 层索引读取 QoL（含 LayerUnlock 动态注册）的层级背景横幅精灵。</summary>
+        internal static bool TryGetLayerBannerSprite(int biomeIndex, out Sprite sprite)
+        {
+            sprite = null;
+            try
+            {
+                return Provider.TryGetLayerBackgroundSprite(biomeIndex, out sprite);
+            }
+            catch
+            {
+                sprite = null;
+                return false;
             }
         }
     }

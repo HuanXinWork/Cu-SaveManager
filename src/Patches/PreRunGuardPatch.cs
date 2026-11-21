@@ -9,6 +9,11 @@ namespace CasualtiesUnknown.SaveManager
     [HarmonyPatch(typeof(AdaptiveButton), "overlayActive", MethodType.Getter)]
     internal static class AdaptiveButtonOverlayActiveGuard
     {
+        private static int _cachedFrame = -1;
+        private static bool _cachedPointerOver;
+        private static RectTransform _cachedRect;
+        private static Canvas _cachedRootCanvas;
+
         private static void Postfix(ref bool __result)
         {
             if (UiBlocker.IsBlocking || IsPointerOverInjectedButton())
@@ -18,18 +23,38 @@ namespace CasualtiesUnknown.SaveManager
         internal static bool IsPointerOverInjectedButton()
         {
             RectTransform rt = MenuButtonUiInjector.InjectedRect;
-            if (rt == null) return false;
+            if (rt == null)
+            {
+                _cachedRect = null;
+                _cachedRootCanvas = null;
+                return false;
+            }
+
+            int frame = Time.frameCount;
+            if (_cachedFrame == frame && ReferenceEquals(_cachedRect, rt))
+            {
+                return _cachedPointerOver;
+            }
+
+            _cachedFrame = frame;
             try
             {
-                Canvas canvas = rt.GetComponentInParent<Canvas>();
-                if (canvas != null) canvas = canvas.rootCanvas;
-                Camera cam = canvas == null || canvas.renderMode == RenderMode.ScreenSpaceOverlay
+                if (!ReferenceEquals(_cachedRect, rt) || _cachedRootCanvas == null)
+                {
+                    _cachedRect = rt;
+                    Canvas canvas = rt.GetComponentInParent<Canvas>();
+                    _cachedRootCanvas = canvas != null ? canvas.rootCanvas : null;
+                }
+
+                Camera cam = _cachedRootCanvas == null || _cachedRootCanvas.renderMode == RenderMode.ScreenSpaceOverlay
                     ? null
-                    : canvas.worldCamera;
-                return RectTransformUtility.RectangleContainsScreenPoint(rt, Input.mousePosition, cam);
+                    : _cachedRootCanvas.worldCamera;
+                _cachedPointerOver = RectTransformUtility.RectangleContainsScreenPoint(rt, Input.mousePosition, cam);
+                return _cachedPointerOver;
             }
             catch
             {
+                _cachedPointerOver = false;
                 return false;
             }
         }
@@ -48,7 +73,7 @@ namespace CasualtiesUnknown.SaveManager
             if (m != null && !_patchLogged)
             {
                 _patchLogged = true;
-                ModLog.Info("AdaptiveButtonClickedGuard.TargetMethod 命中 AdaptiveButton.Clicked");
+                ModLog.Debug("AdaptiveButtonClickedGuard.TargetMethod 命中 AdaptiveButton.Clicked");
             }
             return m;
         }
@@ -61,7 +86,7 @@ namespace CasualtiesUnknown.SaveManager
                 if (!_logged)
                 {
                     _logged = true;
-                    ModLog.Info("AdaptiveButtonClickedGuard 首次拦截穿透点击");
+                    ModLog.Debug("AdaptiveButtonClickedGuard 首次拦截穿透点击");
                 }
                 return false;
             }

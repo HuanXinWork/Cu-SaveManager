@@ -1,4 +1,4 @@
-# CuSaveManager V1.3.4 for Casualties: Unknown
+# CuSaveManager V1.3.5 for Casualties: Unknown
 
 > 适配游戏《未知伤亡》的多存档、死亡回档与固定世界模组
 > 兼容：Casualties: Together 联机（5.5.x）、QoL Unknown（缺少不影响基础功能）

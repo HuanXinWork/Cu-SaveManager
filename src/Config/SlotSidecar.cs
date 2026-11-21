@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace CasualtiesUnknown.SaveManager
 {
@@ -53,6 +55,9 @@ namespace CasualtiesUnknown.SaveManager
 
         internal List<SlotMpPlayer> MpPlayers { get; set; } = new List<SlotMpPlayer>();
 
+        /// <summary>标记实例是否对应磁盘已有伴生文件（运行时状态，不写入 JSON）。</summary>
+        internal bool LoadedFromDisk { get; set; }
+
         internal string Describe()
         {
             string pos = HasPlayerPos
@@ -74,10 +79,13 @@ namespace CasualtiesUnknown.SaveManager
             {
                 string p = SidecarPath(slotPath);
                 if (string.IsNullOrEmpty(p) || !File.Exists(p)) return new SlotSidecar();
-                return Parse(File.ReadAllText(p, Encoding.UTF8));
+                SlotSidecar loaded = Parse(File.ReadAllText(p, Encoding.UTF8));
+                loaded.LoadedFromDisk = true;
+                return loaded;
             }
-            catch
+            catch (Exception ex)
             {
+                ModLog.Warning($"读取伴生元数据失败 ({slotPath})：{ex.Message}");
                 return new SlotSidecar();
             }
         }
@@ -97,18 +105,22 @@ namespace CasualtiesUnknown.SaveManager
                     try
                     {
                         File.Replace(tmp, p, null);
+                        LoadedFromDisk = true;
                         return;
                     }
                     catch
                     {
                         File.WriteAllText(p, content, TopJson.Utf8NoBom);
+                        LoadedFromDisk = true;
                         return;
                     }
                 }
                 File.Move(tmp, p);
+                LoadedFromDisk = true;
             }
-            catch
+            catch (Exception ex)
             {
+                ModLog.Warning($"写入伴生元数据失败 ({p})：{ex.Message}");
             }
             finally
             {
@@ -131,104 +143,154 @@ namespace CasualtiesUnknown.SaveManager
 
         private string Serialize()
         {
-            var inv = CultureInfo.InvariantCulture;
-            var sb = new StringBuilder(256);
-            sb.Append('{');
-            sb.Append("\"nickname\":").Append(TopJson.EscapeString(Nickname)).Append(',');
-            sb.Append("\"pinned\":").Append(Pinned ? "true" : "false").Append(',');
-            sb.Append("\"isAuto\":").Append(IsAuto ? "true" : "false").Append(',');
-            sb.Append("\"biome\":").Append(Biome.ToString(inv)).Append(',');
-            sb.Append("\"runId\":").Append(RunId.ToString(inv)).Append(',');
-            sb.Append("\"lastPlayedAtUnixMs\":").Append(LastPlayedAtUnixMs.ToString(inv)).Append(',');
-            sb.Append("\"hasPlayerPos\":").Append(HasPlayerPos ? "true" : "false").Append(',');
-            sb.Append("\"playerX\":").Append(PlayerX.ToString("R", inv)).Append(',');
-            sb.Append("\"playerY\":").Append(PlayerY.ToString("R", inv)).Append(',');
-            sb.Append("\"qolSeed\":").Append(QolSeed.ToString(inv)).Append(',');
-            sb.Append("\"qolSeedInput\":").Append(TopJson.EscapeString(QolSeedInput)).Append(',');
-            sb.Append("\"worldEngine\":").Append(TopJson.EscapeString(WorldEngine)).Append(',');
-            sb.Append("\"mpWorldEngine\":").Append(TopJson.EscapeString(MpWorldEngine)).Append(',');
-            sb.Append("\"posMode\":").Append(TopJson.EscapeString(PosMode)).Append(',');
-            sb.Append("\"fixedX\":").Append(FixedX.ToString("R", inv)).Append(',');
-            sb.Append("\"fixedY\":").Append(FixedY.ToString("R", inv)).Append(',');
-            sb.Append("\"isMultiplayer\":").Append(IsMultiplayer ? "true" : "false").Append(',');
-            sb.Append("\"activeLayerModifierIndex\":").Append(ActiveLayerModifierIndex.ToString(inv)).Append(',');
-            sb.Append("\"character\":").Append(Character.ToString(inv)).Append(',');
-            sb.Append("\"mpPlayerIds\":").Append(StringArray(MpPlayers, p => p.PersistentId)).Append(',');
-            sb.Append("\"mpPlayerNames\":").Append(StringArray(MpPlayers, p => p.Name)).Append(',');
-            sb.Append("\"mpPlayerSteamIds\":").Append(StringArray(MpPlayers, p => p.SteamId == 0UL
-                ? ""
-                : p.SteamId.ToString(inv)));
-            sb.Append('}');
-            return sb.ToString();
+            var ids = new JArray();
+            var names = new JArray();
+            var steamIds = new JArray();
+            if (MpPlayers != null)
+            {
+                for (int i = 0; i < MpPlayers.Count; i++)
+                {
+                    SlotMpPlayer p = MpPlayers[i];
+                    ids.Add(p.PersistentId ?? "");
+                    names.Add(p.Name ?? "");
+                    steamIds.Add(p.SteamId == 0UL ? "" : p.SteamId.ToString(CultureInfo.InvariantCulture));
+                }
+            }
+
+            var obj = new JObject
+            {
+                ["nickname"] = Nickname ?? "",
+                ["pinned"] = Pinned,
+                ["isAuto"] = IsAuto,
+                ["biome"] = Biome,
+                ["runId"] = RunId,
+                ["lastPlayedAtUnixMs"] = LastPlayedAtUnixMs,
+                ["hasPlayerPos"] = HasPlayerPos,
+                ["playerX"] = PlayerX,
+                ["playerY"] = PlayerY,
+                ["qolSeed"] = QolSeed,
+                ["qolSeedInput"] = QolSeedInput ?? "",
+                ["worldEngine"] = WorldEngine ?? "",
+                ["mpWorldEngine"] = MpWorldEngine ?? "",
+                ["posMode"] = PosMode ?? "",
+                ["fixedX"] = FixedX,
+                ["fixedY"] = FixedY,
+                ["isMultiplayer"] = IsMultiplayer,
+                ["activeLayerModifierIndex"] = ActiveLayerModifierIndex,
+                ["character"] = Character,
+                ["mpPlayerIds"] = ids,
+                ["mpPlayerNames"] = names,
+                ["mpPlayerSteamIds"] = steamIds,
+            };
+            return obj.ToString(Formatting.None);
         }
 
         private static SlotSidecar Parse(string text)
         {
             var s = new SlotSidecar();
-            if (string.IsNullOrEmpty(text)) return s;
-            s.Nickname = TopJson.TryReadString(text, "nickname", out string nick) ? (nick ?? "") : "";
-            s.Pinned = TopJson.TryReadBool(text, "pinned", out bool pinned) && pinned;
-            s.IsAuto = TopJson.TryReadBool(text, "isAuto", out bool isAuto) && isAuto;
-            s.Biome = TopJson.TryReadInt(text, "biome", out int biome) ? biome : 0;
-            if (!TopJson.TryReadInt(text, "runId", out int rid) || rid == 0)
-            {
-                TopJson.TryReadInt(text, "seed", out rid);
-            }
+            if (string.IsNullOrWhiteSpace(text)) return s;
+
+            var obj = JObject.Parse(text);
+            s.Nickname = ReadString(obj, "nickname");
+            s.Pinned = ReadBool(obj, "pinned");
+            s.IsAuto = ReadBool(obj, "isAuto");
+            s.Biome = ReadInt(obj, "biome", 0);
+
+            // 旧版伴生文件曾用 "seed" 存放对局 ID，runId 缺失或为 0 时回退兼容。
+            int rid = ReadInt(obj, "runId", 0);
+            if (rid == 0) rid = ReadInt(obj, "seed", 0);
             s.RunId = rid;
-            s.LastPlayedAtUnixMs = TopJson.TryReadLong(text, "lastPlayedAtUnixMs", out long ms) ? ms : 0L;
-            s.HasPlayerPos = TopJson.TryReadBool(text, "hasPlayerPos", out bool hasPos) && hasPos;
-            s.PlayerX = TopJson.TryReadFloat(text, "playerX", out float px) ? px : 0f;
-            s.PlayerY = TopJson.TryReadFloat(text, "playerY", out float py) ? py : 0f;
-            s.QolSeed = TopJson.TryReadInt(text, "qolSeed", out int qseed) ? qseed : 0;
-            s.QolSeedInput = TopJson.TryReadString(text, "qolSeedInput", out string qin) ? (qin ?? "") : "";
-            s.WorldEngine = TopJson.TryReadString(text, "worldEngine", out string we) ? (we ?? "") : "";
-            s.MpWorldEngine = TopJson.TryReadString(text, "mpWorldEngine", out string mpwe) ? (mpwe ?? "") : "";
-            s.PosMode = TopJson.TryReadString(text, "posMode", out string pm) ? (pm ?? "") : "";
-            s.FixedX = TopJson.TryReadFloat(text, "fixedX", out float fx) ? fx : 0f;
-            s.FixedY = TopJson.TryReadFloat(text, "fixedY", out float fy) ? fy : 0f;
-            s.IsMultiplayer = TopJson.TryReadBool(text, "isMultiplayer", out bool isMp) && isMp;
-            s.ActiveLayerModifierIndex = TopJson.TryReadInt(text, "activeLayerModifierIndex", out int modIdx)
-                ? modIdx
-                : (TopJson.HasKey(text, "activeLayerModifierIndex") ? 0 : -2);
-            s.Character = TopJson.TryReadInt(text, "character", out int ch)
-                ? ch
-                : (TopJson.HasKey(text, "character") ? 0 : -1);
-            s.MpPlayers = ReadMpPlayers(text);
+
+            s.LastPlayedAtUnixMs = ReadLong(obj, "lastPlayedAtUnixMs", 0L);
+            s.HasPlayerPos = ReadBool(obj, "hasPlayerPos");
+            s.PlayerX = ReadFloat(obj, "playerX");
+            s.PlayerY = ReadFloat(obj, "playerY");
+            s.QolSeed = ReadInt(obj, "qolSeed", 0);
+            s.QolSeedInput = ReadString(obj, "qolSeedInput");
+            s.WorldEngine = ReadString(obj, "worldEngine");
+            s.MpWorldEngine = ReadString(obj, "mpWorldEngine");
+            s.PosMode = ReadString(obj, "posMode");
+            s.FixedX = ReadFloat(obj, "fixedX");
+            s.FixedY = ReadFloat(obj, "fixedY");
+            s.IsMultiplayer = ReadBool(obj, "isMultiplayer");
+            s.ActiveLayerModifierIndex = ReadInt(obj, "activeLayerModifierIndex", -2);
+            s.Character = ReadInt(obj, "character", -1);
+            s.MpPlayers = ReadMpPlayers(obj);
             return s;
         }
 
-        private static List<SlotMpPlayer> ReadMpPlayers(string text)
+        private static List<SlotMpPlayer> ReadMpPlayers(JObject obj)
         {
             var result = new List<SlotMpPlayer>();
-            var ids = TopJson.ReadStringArray(text, "mpPlayerIds");
-            if (ids.Count == 0) return result;
-            var names = TopJson.ReadStringArray(text, "mpPlayerNames");
-            var steamIds = TopJson.ReadStringArray(text, "mpPlayerSteamIds");
+            if (!(obj["mpPlayerIds"] is JArray ids) || ids.Count == 0) return result;
+
+            var names = obj["mpPlayerNames"] as JArray;
+            var steamIds = obj["mpPlayerSteamIds"] as JArray;
             for (int i = 0; i < ids.Count; i++)
             {
-                if (string.IsNullOrEmpty(ids[i])) continue;
+                string id = ids[i]?.Type == JTokenType.Null ? null : (string)ids[i];
+                if (string.IsNullOrEmpty(id)) continue;
+
+                string name = names != null && i < names.Count && names[i]?.Type != JTokenType.Null
+                    ? ((string)names[i] ?? "")
+                    : "";
+
                 ulong steamId = 0UL;
-                if (i < steamIds.Count)
+                if (steamIds != null && i < steamIds.Count && steamIds[i]?.Type != JTokenType.Null)
                 {
-                    ulong.TryParse(steamIds[i], NumberStyles.Integer, CultureInfo.InvariantCulture, out steamId);
+                    ulong.TryParse((string)steamIds[i], NumberStyles.Integer, CultureInfo.InvariantCulture, out steamId);
                 }
-                result.Add(new SlotMpPlayer(ids[i], i < names.Count ? names[i] : "", steamId));
+                result.Add(new SlotMpPlayer(id, name, steamId));
             }
             return result;
         }
 
-        private static string StringArray(List<SlotMpPlayer> players, Func<SlotMpPlayer, string> selector)
+        private static string ReadString(JObject obj, string key)
         {
-            if (players == null || players.Count == 0) return "[]";
-            var sb = new StringBuilder(players.Count * 24 + 2);
-            sb.Append('[');
-            for (int i = 0; i < players.Count; i++)
+            JToken token = obj[key];
+            return token == null || token.Type == JTokenType.Null ? "" : ((string)token ?? "");
+        }
+
+        private static bool ReadBool(JObject obj, string key)
+        {
+            JToken token = obj[key];
+            if (token == null || token.Type == JTokenType.Null) return false;
+            if (token.Type == JTokenType.Boolean) return (bool)token;
+            return bool.TryParse(token.ToString(), out bool v) && v;
+        }
+
+        private static int ReadInt(JObject obj, string key, int fallback)
+        {
+            JToken token = obj[key];
+            if (token == null || token.Type == JTokenType.Null) return fallback;
+            if (token.Type == JTokenType.Integer)
             {
-                if (i > 0) sb.Append(',');
-                sb.Append(TopJson.EscapeString(selector(players[i])));
+                long lv = (long)token;
+                return lv >= int.MinValue && lv <= int.MaxValue ? (int)lv : fallback;
             }
-            sb.Append(']');
-            return sb.ToString();
+            return int.TryParse(token.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int v)
+                ? v
+                : fallback;
+        }
+
+        private static long ReadLong(JObject obj, string key, long fallback)
+        {
+            JToken token = obj[key];
+            if (token == null || token.Type == JTokenType.Null) return fallback;
+            if (token.Type == JTokenType.Integer) return (long)token;
+            return long.TryParse(token.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out long v)
+                ? v
+                : fallback;
+        }
+
+        private static float ReadFloat(JObject obj, string key, float fallback = 0f)
+        {
+            JToken token = obj[key];
+            if (token == null || token.Type == JTokenType.Null) return fallback;
+            if (token.Type == JTokenType.Float || token.Type == JTokenType.Integer) return (float)token;
+            return float.TryParse(token.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out float v)
+                ? v
+                : fallback;
         }
     }
 }

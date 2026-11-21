@@ -17,7 +17,7 @@ namespace CasualtiesUnknown.SaveManager
         private const string PluginGuid = "com.casualtiesUnknown.saveManager";
         private const string QolGuid = "org.bepinex.plugins.qol_unknown";
         private const string PluginName = "CuSaveManager";
-        internal const string PluginVersion = "1.3.4";
+        internal const string PluginVersion = BuildInfo.Version;
 
         private static ManualLogSource _log;
         private static Plugin _instance;
@@ -27,6 +27,7 @@ namespace CasualtiesUnknown.SaveManager
         private OverlayUI _overlay;
         private SaveManagerWindow _window;
         private RollbackController _rollback;
+        private Action _openPanelAction;
 
         private float _nextAutoBackupAt = float.PositiveInfinity;
         private string _lastMessage;
@@ -38,6 +39,10 @@ namespace CasualtiesUnknown.SaveManager
 
         private static bool _quitting;
 
+        internal static SaveStore SharedStore => _instance?._store;
+        internal static bool ShouldBackupBeforeOverwrite => _instance?._cfg?.BackupBeforeOverwrite?.Value ?? true;
+        internal static bool AllowPartialMpRollback => _instance?._cfg?.AllowPartialMultiplayerRollback?.Value ?? false;
+        internal static float MpStageTwoDelaySeconds => _instance?._cfg?.MpStageTwoDelaySeconds?.Value ?? 0.75f;
         internal static string PreferredLanguageMode => _instance?._cfg?.PreferredLanguage?.Value ?? "auto";
 
         internal static void ClosePanelIfOpen() => _instance?._window?.ClosePanel();
@@ -49,24 +54,40 @@ namespace CasualtiesUnknown.SaveManager
             gameObject.hideFlags = HideFlags.HideAndDontSave;
             UnityEngine.Object.DontDestroyOnLoad(gameObject);
             _cfg = new HotkeyConfig(Config);
+            ExternalTabRegistry.BindUiScaleConfig(
+                () => _cfg.UiScalePercent.Value,
+                v =>
+                {
+                    _cfg.UiScalePercent.Value = v;
+                    try { Config.Save(); }
+                    catch (Exception ex) { ModLog.Warning($"保存界面缩放配置失败：{ex.Message}"); }
+                });
             ModLog.Init(_log);
             ModLog.Debug("[Build] Debug 构建，详细日志已启用");
             ModLog.ShowInConsole = _cfg.ShowLogInConsole.Value;
             _cfg.ShowLogInConsole.SettingChanged += (_, __) => ModLog.ShowInConsole = _cfg.ShowLogInConsole.Value;
 
-            // Searching for translation files when launching the game
             string localizationDir = Path.Combine(Paths.PluginPath, "CuSaveManagerLocales");
             I18n.Init(localizationDir);
 
             UpdateChecker.Enabled = _cfg.AcceptUpdateNotice.Value;
+            _cfg.AcceptUpdateNotice.SettingChanged += (_, __)
+                => UpdateChecker.Enabled = _cfg.AcceptUpdateNotice.Value;
             StartingSuppliesOnLoadGuardPatch.Enabled = _cfg.SuppressStartingSuppliesOnLoad.Value;
             _cfg.SuppressStartingSuppliesOnLoad.SettingChanged += (_, __)
                 => StartingSuppliesOnLoadGuardPatch.Enabled = _cfg.SuppressStartingSuppliesOnLoad.Value;
             IntroLifepodOnLoadGuardPatch.Enabled = _cfg.SuppressIntroLifepodOnLoad.Value;
             _cfg.SuppressIntroLifepodOnLoad.SettingChanged += (_, __)
                 => IntroLifepodOnLoadGuardPatch.Enabled = _cfg.SuppressIntroLifepodOnLoad.Value;
-            WorldEngineArbiter.SyncPreference(_cfg.PreferredEngine.Value, _cfg.SeedInput.Value,
-                _cfg.PositionMode.Value, _cfg.FixedX.Value, _cfg.FixedY.Value);
+
+            SyncWorldConfig();
+            EventHandler syncWorldHandler = (_, __) => SyncWorldConfig();
+            _cfg.PreferredEngine.SettingChanged += syncWorldHandler;
+            _cfg.SeedInput.SettingChanged += syncWorldHandler;
+            _cfg.PositionMode.SettingChanged += syncWorldHandler;
+            _cfg.FixedX.SettingChanged += syncWorldHandler;
+            _cfg.FixedY.SettingChanged += syncWorldHandler;
+
             _store = new SaveStore();
             _rollback = new RollbackController(_cfg, _store);
 
@@ -82,25 +103,60 @@ namespace CasualtiesUnknown.SaveManager
                 onOpened: OnPanelOpened,
                 onClosed: OnPanelClosed,
                 rollback: _rollback);
-
-            MenuButtonUiInjector.Setup(() => _window.OpenPanel());
+            _openPanelAction = () => _window.OpenPanel();
 
             ResetAutoBackupTimer();
             // 订阅 Application.quitting 而非 OnApplicationQuit，确保在插件对象销毁前先卸载 Harmony 补丁。
             Application.quitting += OnApplicationQuitting;
-            ModLog.Info($"{PluginName} ready · slots→{_store.SlotsRoot} · save.sv={SaveStore.GameSavePath}");
+            ModLog.Info($"{PluginName} v{PluginVersion} ready · slots→{_store.SlotsRoot} · save.sv={SaveStore.GameSavePath}");
             ModLog.Info(MultiplayerBridge.IsMultiplayerRunning() || MultiplayerBridge.IsModPresent()
                 ? I18n.T("mp.mod_detected") : I18n.T("mp.mod_not_detected"));
             ModLog.Info(QolBridge.IsQolPresent() ? I18n.T("qol.mod_detected") : I18n.T("qol.mod_not_detected"));
             LogInteropResolution();
-            TogetherModHooksBridge.TryBindAll();
-            MpWorldSeedInjector.TryPatch();
-            MpSeedBroadcast.TryPatch();
+
+            HarmonyBootstrap.PatchAllIsolated();
+            MenuButtonUiInjector.Setup(_openPanelAction);
             MpRollbackRunner.Ensure(this);
-            MpPositionRestorer.TryPatchHarmony();
-            QolSpawnSuppressor.TryPatch();
-            QolTrapClearGuard.TryPatch();
+
+            Action[] deferredPatchers =
+            {
+                TogetherModHooksBridge.TryBindAll,
+                SeededWorldPatcher.TryPatch,
+                LoadRunPrefixReplacer.TryPatch,
+                MpCharacterRestore.TryPatch,
+                MpWorldSeedInjector.TryPatch,
+                MpSeedBroadcast.TryPatch,
+                MpPositionRestorer.TryPatchHarmony,
+                QolSpawnSuppressor.TryPatch,
+                QolTrapClearGuard.TryPatch,
+            };
+            for (int i = 0; i < deferredPatchers.Length; i++)
+            {
+                try { deferredPatchers[i](); }
+                catch (Exception ex) { ModLog.Warning($"延迟补丁初始化失败：{ex.Message}"); }
+            }
+
             gameObject.AddComponent<UpdateChecker>();
+        }
+
+        private void Start()
+        {
+            // 所有 BepInEx 插件 Awake 已执行完毕，通知互操作层可缓存未安装模组的负向结果。
+            InteropBootstrap.MarkPluginScanComplete();
+        }
+
+        private void SyncWorldConfig()
+        {
+            float fx = _cfg.FixedX.Value;
+            float fy = _cfg.FixedY.Value;
+            if (float.IsNaN(fx) || float.IsInfinity(fx)) fx = 0f;
+            if (float.IsNaN(fy) || float.IsInfinity(fy)) fy = 0f;
+            WorldEngineArbiter.SyncPreference(
+                _cfg.PreferredEngine.Value,
+                _cfg.SeedInput.Value,
+                _cfg.PositionMode.Value,
+                fx,
+                fy);
         }
 
         private void LogInteropResolution()
@@ -108,9 +164,9 @@ namespace CasualtiesUnknown.SaveManager
             try
             {
                 InteropBootstrap.Initialize();
-                ModLog.Info("Interop：" + InteropBootstrap.Together.DescribeResolvedMembers());
-                ModLog.Info("Interop：" + InteropBootstrap.Qol.DescribeResolvedMembers());
-                ModLog.Info("Interop：" + InteropBootstrap.LayerUnlock.DescribeResolvedMembers());
+                ModLog.Debug("Interop：" + InteropBootstrap.Together.DescribeResolvedMembers());
+                ModLog.Debug("Interop：" + InteropBootstrap.Qol.DescribeResolvedMembers());
+                ModLog.Debug("Interop：" + InteropBootstrap.LayerUnlock.DescribeResolvedMembers());
             }
             catch (Exception ex)
             {
@@ -125,6 +181,7 @@ namespace CasualtiesUnknown.SaveManager
             if (_quitting) return;
             _quitting = true;
             try { _rollback?.Dispose(); } catch { }
+            try { HarmonyBootstrap.UnpatchAll(); } catch { }
             try { MenuButtonUiInjector.Dispose(); } catch { }
             try { OnPanelClosed(); } catch { }
             try { BlackWhiteSkin.Dispose(); } catch { }
@@ -139,8 +196,16 @@ namespace CasualtiesUnknown.SaveManager
 
             if (_cfg.AutoBackupEnabled.Value && Time.unscaledTime >= _nextAutoBackupAt)
             {
-                DoAutoBackup();
-                ResetAutoBackupTimer();
+                if (OverlayUI.IsGamePaused())
+                {
+                    // 暂停菜单挂机时延后重试，避免世界静止期间反复同步写盘。
+                    _nextAutoBackupAt = Time.unscaledTime + 5f;
+                }
+                else
+                {
+                    DoAutoBackup();
+                    ResetAutoBackupTimer();
+                }
             }
         }
 
@@ -179,7 +244,7 @@ namespace CasualtiesUnknown.SaveManager
         {
             if (_quitting) return;
             ImGuiImeRecovery.TickOnGui(_window.ExpectsTextInput);
-            if (!_window.Open) _overlay.Draw(() => _window.OpenPanel());
+            if (!_window.Open) _overlay.Draw(_openPanelAction);
             _window.Draw();
         }
 
@@ -255,7 +320,7 @@ namespace CasualtiesUnknown.SaveManager
                 bool mpRunning = MultiplayerBridge.IsMultiplayerRunning();
                 if (mpRunning && !MultiplayerBridge.IsServer())
                 {
-                    ModLog.Info(I18n.T("mp.client_skip_autosave"));
+                    ModLog.Debug(I18n.T("mp.client_skip_autosave"));
                     return;
                 }
                 if (mpRunning && MultiplayerBridge.IsGamemodeActive())
@@ -265,7 +330,7 @@ namespace CasualtiesUnknown.SaveManager
                 if (!HasValidLivePlayerForSave(dedicatedServer: false)) return;
                 if (!GameSaveBridge.CanSnapshotCurrentLayer() || (mpRunning && IsMpTeamAtLayerFinish()))
                 {
-                    ModLog.Info(I18n.T("msg.save_skip_layer_transition"));
+                    ModLog.Debug(I18n.T("msg.save_skip_layer_transition"));
                     return;
                 }
 
@@ -316,7 +381,7 @@ namespace CasualtiesUnknown.SaveManager
                     }
                     _store.SaveManual(I18n.T("lbl.save_exit_alias"));
                     _window.ClosePanel();
-                    PlayerCamera.main.ToMainMenu();
+                    PlayerCamera.main?.ToMainMenu();
                     SetMessage(I18n.T("msg.save_exit_mp_done"));
                     return;
                 }
@@ -355,7 +420,7 @@ namespace CasualtiesUnknown.SaveManager
                 _store.SaveManual(I18n.T("lbl.save_exit_alias"));
                 ModLog.Flow("UI", "22", "保存并退出：槽位已写入，回主菜单");
                 _window.ClosePanel();
-                PlayerCamera.main.ToMainMenu();
+                PlayerCamera.main?.ToMainMenu();
                 SetMessage(I18n.T("msg.save_exit_done"));
             }
             catch (Exception ex)
@@ -444,9 +509,9 @@ namespace CasualtiesUnknown.SaveManager
         {
             try
             {
-                _store.DeleteSlot(slot.FullSlotPath);
+                bool deleted = _store.DeleteSlot(slot.FullSlotPath);
                 _window?.InvalidateSlotCache();
-                SetMessage(I18n.F("fmt.deleted", slot.File.Name));
+                SetMessage(I18n.F(deleted ? "fmt.deleted" : "fmt.delete_failed", slot.File.Name));
             }
             catch (Exception ex)
             {
@@ -480,12 +545,13 @@ namespace CasualtiesUnknown.SaveManager
         private void OnPanelOpened()
         {
             UiBlocker.Block();
-            ModLog.Info(SaveStore.DescribeSavePathDecision());
+            ModLog.Debug(SaveStore.DescribeSavePathDecision());
         }
 
         private void OnPanelClosed()
         {
             UiBlocker.Unblock();
+            try { Config?.Save(); } catch { }
         }
     }
 }

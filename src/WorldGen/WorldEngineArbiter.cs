@@ -11,9 +11,11 @@ namespace CasualtiesUnknown.SaveManager
     /// <summary>按用户配置与在场模组裁决并切换世界生成引擎（qol / krok / self）。</summary>
     internal static class WorldEngineArbiter
     {
+        internal const string DefaultEngineName = "qol";
+
         internal static WorldEngine Current { get; private set; } = WorldEngine.Self;
 
-        internal static string PreferredEngine { get; private set; } = "qol";
+        internal static string PreferredEngine { get; private set; } = DefaultEngineName;
         internal static string ManualSeedInput { get; private set; } = "";
         internal static string PositionMode { get; private set; } = "lastPos";
         internal static float FixedX { get; private set; }
@@ -34,9 +36,9 @@ namespace CasualtiesUnknown.SaveManager
 
         internal static string NormalizeEngineName(string name)
         {
-            if (string.IsNullOrWhiteSpace(name)) return "self";
+            if (string.IsNullOrWhiteSpace(name)) return DefaultEngineName;
             name = name.Trim().ToLowerInvariant();
-            return name == "qol" || name == "krok" ? name : "self";
+            return name == "qol" || name == "krok" || name == "self" ? name : DefaultEngineName;
         }
 
         internal static string ResolveEffectiveEngineName(string preferred = null)
@@ -106,6 +108,20 @@ namespace CasualtiesUnknown.SaveManager
                 QolBridge.PrepareRollback(sidecar);
                 return;
             }
+            if (seed == 0 && string.IsNullOrEmpty(input))
+            {
+                string svPath = MpSaveLocator.ResolveOwnSavePath() ?? MpSaveLocator.ResolveLocalPlayerSavePath();
+                seed = QolBridge.ComputeDeterministicSeedFromSaveFile(svPath);
+                if (seed != 0)
+                {
+                    if (sidecar != null) sidecar.QolSeed = seed;
+                    ModLog.Info($"多人回档种子补记：sidecar 无种子，用存档 FNV 补记 seed={seed}");
+                }
+                else
+                {
+                    ModLog.Warning("多人回档：sidecar 无种子且无法从 mp_save 计算 FNV 种子，self 引擎将回退默认种子");
+                }
+            }
             Apply(WorldEngine.Self, seed, input);
         }
 
@@ -150,7 +166,7 @@ namespace CasualtiesUnknown.SaveManager
             return "不等同手输种子也不同于当前 sidecar，按新开局随机种子/多人回放处理";
         }
 
-        private static string ResolveSidecarEngine(SlotSidecar sidecar)
+        internal static string ResolveSidecarEngine(SlotSidecar sidecar)
         {
             if (!string.IsNullOrEmpty(sidecar?.WorldEngine))
                 return ResolveEffectiveEngineName(sidecar.WorldEngine);

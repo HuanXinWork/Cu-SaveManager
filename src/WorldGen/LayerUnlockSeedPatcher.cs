@@ -56,7 +56,7 @@ namespace CasualtiesUnknown.SaveManager
                 IReadOnlyList<MethodInfo> moveNextMethods = provider.MoveNextMethods;
                 if (moveNextMethods.Count == 0) return;
 
-                Harmony harmony = new Harmony("com.casualtiesUnknown.saveManager.layerUnlockSeed");
+                Harmony harmony = HarmonyBootstrap.Instance;
                 Type self = typeof(LayerUnlockSeedPatcher);
                 HarmonyMethod prefix = new HarmonyMethod(self.GetMethod(nameof(MoveNext_Prefix),
                     BindingFlags.Static | BindingFlags.NonPublic));
@@ -65,7 +65,11 @@ namespace CasualtiesUnknown.SaveManager
 
                 for (int i = 0; i < moveNextMethods.Count; i++)
                 {
-                    harmony.Patch(moveNextMethods[i], prefix: prefix, finalizer: finalizer);
+                    MethodInfo target = moveNextMethods[i];
+                    if (!IsAlreadyPatched(target, harmony.Id, nameof(MoveNext_Prefix)))
+                    {
+                        harmony.Patch(target, prefix: prefix, finalizer: finalizer);
+                    }
                 }
 
                 _patched = true;
@@ -77,27 +81,43 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
+        private static bool IsAlreadyPatched(MethodBase target, string ownerId, string methodName)
+        {
+            Patches info = Harmony.GetPatchInfo(target);
+            if (info?.Prefixes == null) return false;
+            foreach (Patch p in info.Prefixes)
+            {
+                if (p.owner == ownerId && p.PatchMethod?.Name == methodName) return true;
+            }
+            return false;
+        }
+
         private static void MoveNext_Prefix(object __instance, MethodBase __originalMethod, out StepScope __state)
         {
             __state = default;
-            CoState co = _table.GetValue(__instance, _ => CreateState(__instance, __originalMethod));
-            if (!co.Active) return;
+            if (__instance == null) return;
+            if (!_table.TryGetValue(__instance, out var state))
+            {
+                state = CreateState(__instance, __originalMethod);
+                _table.Add(__instance, state);
+            }
+            if (!state.Active) return;
 
             __state = new StepScope
             {
                 Active = true,
-                Co = co,
+                Co = state,
                 SavedGlobal = UnityEngine.Random.state,
             };
 
-            if (!co.Seeded)
+            if (!state.Seeded)
             {
-                co.Seeded = true;
-                UnityEngine.Random.InitState(co.Seed);
+                state.Seeded = true;
+                UnityEngine.Random.InitState(state.Seed);
             }
             else
             {
-                UnityEngine.Random.state = co.Saved;
+                UnityEngine.Random.state = state.Saved;
             }
         }
 
@@ -145,7 +165,7 @@ namespace CasualtiesUnknown.SaveManager
             int baseSeed = ResolveBaseSeed();
             int traveled = 0;
             try { if (wg != null) traveled = wg.totalTraveled; } catch { }
-            return baseSeed + traveled * 265443576 + depth * 7919 + salt;
+            return baseSeed + traveled * SeededWorldEngine.LayerSeedStep + depth * 7919 + salt;
         }
 
         private static int ResolveBaseSeed()

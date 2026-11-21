@@ -1,4 +1,4 @@
-# CuSaveManager V1.3.4 for Casualties: Unknown
+# CuSaveManager V1.3.5 for Casualties: Unknown
 
 > Multi-save, death rollback, and deterministic world mod for Casualties: Unknown
 > Compatible with: Casualties: Together multiplayer (5.5.x), QoL Unknown (their absence does not break core features)

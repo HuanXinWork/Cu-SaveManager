@@ -17,9 +17,18 @@ namespace CasualtiesUnknown.SaveManager
         internal static bool StartRunGuarded { get; private set; }
         internal static bool LoadRunGuarded { get; private set; }
 
+        internal static void ResetPatchState()
+        {
+            StartRunGuarded = false;
+            LoadRunGuarded = false;
+        }
+
+        internal static void TrySilence() => TrySilence(HarmonyBootstrap.Instance);
+
         internal static void TrySilence(Harmony harmony)
         {
-            if (harmony == null || TogetherReflection.ModAssembly == null)
+            harmony = harmony ?? HarmonyBootstrap.Instance;
+            if (TogetherReflection.ModAssembly == null)
             {
                 return;
             }

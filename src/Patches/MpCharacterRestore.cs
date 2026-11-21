@@ -8,21 +8,17 @@ namespace CasualtiesUnknown.SaveManager
     /// <summary>联机主机读档切入世界前，将本地存档角色同步写入 <c>PreRunScript.characterSelected</c> 与 <c>Together.ScavPlayer.LocalPlayer.selectedCharacter</c>。</summary>
     internal static class MpCharacterRestore
     {
-        private const string FallbackHarmonyId = "com.casualtiesUnknown.saveManager.mpCharacter";
+        private static bool _patched;
 
-        private static Harmony _fallbackHarmony;
+        internal static void ResetPatchState() => _patched = false;
 
-        internal static void ResetPatchState()
+        internal static void TryPatch() => TryPatch(HarmonyBootstrap.Instance);
+
+        internal static void TryPatch(Harmony harmony)
         {
-            try { _fallbackHarmony?.UnpatchSelf(); } catch { }
-            _fallbackHarmony = null;
-        }
-
-        internal static void TryPatch(Harmony harmony = null)
-        {
-            if (harmony != null)
+            if (_patched)
             {
-                ApplyLayerModifiersRestorePatch.BindHarmony(harmony);
+                return;
             }
 
             try
@@ -34,7 +30,7 @@ namespace CasualtiesUnknown.SaveManager
                     return;
                 }
 
-                Harmony targetHarmony = harmony ?? (_fallbackHarmony ?? (_fallbackHarmony = new Harmony(FallbackHarmonyId)));
+                Harmony targetHarmony = harmony ?? HarmonyBootstrap.Instance;
                 Patches info = Harmony.GetPatchInfo(load);
                 if (info?.Prefixes != null)
                 {
@@ -42,6 +38,7 @@ namespace CasualtiesUnknown.SaveManager
                     {
                         if (patch.owner == targetHarmony.Id && patch.PatchMethod?.Name == nameof(Prefix))
                         {
+                            _patched = true;
                             return;
                         }
                     }
@@ -49,6 +46,7 @@ namespace CasualtiesUnknown.SaveManager
 
                 targetHarmony.Patch(load, prefix: new HarmonyMethod(
                     typeof(MpCharacterRestore).GetMethod(nameof(Prefix), BindingFlags.Static | BindingFlags.NonPublic)));
+                _patched = true;
                 ModLog.Info("读档角色兜底已挂载（Together.WorldMP.LoadVanillaGeneratedWorld）");
             }
             catch (Exception ex)
@@ -75,20 +73,16 @@ namespace CasualtiesUnknown.SaveManager
                 return;
             }
 
+            RestoreSavedCharacter(PreRunScript.instance);
+        }
+
+        private static void RestoreSavedCharacter(PreRunScript pre)
+        {
             try
             {
-                string savePath = MpSaveLocator.ResolveOwnSavePath();
-                int? character = SaveStore.TryReadCharacterWithSidecar(savePath);
-                if (character == null)
-                {
-                    ModLog.Info("读档角色兜底跳过：本地玩家存档里没有可解析的 character");
-                    return;
-                }
-
-                PreRunScript.characterSelected = character.Value;
-                bool applied = InteropBootstrap.Together.TryApplyCharacterToLocalPlayer(character.Value);
-                ModLog.Info($"读档角色兜底：character={character.Value} path={savePath ?? "<none>"} "
-                    + $"localPlayer={(applied ? "ok" : "skip")}");
+                PlayerCharacterBridge.Apply(
+                    MpSaveLocator.ResolveOwnSavePath() ?? MpSaveLocator.ResolveLocalPlayerSavePath(),
+                    pre);
             }
             catch (Exception ex)
             {

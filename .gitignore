@@ -4,3 +4,4 @@ obj/
 .vs
 docs/
 tools/
+build/

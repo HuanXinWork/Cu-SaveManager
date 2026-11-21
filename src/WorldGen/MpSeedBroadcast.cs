@@ -130,12 +130,18 @@ namespace CasualtiesUnknown.SaveManager
                     return;
                 }
 
-                Harmony harmony = new Harmony("com.casualtiesUnknown.saveManager.mpSeedBroadcast");
+                Harmony harmony = HarmonyBootstrap.Instance;
                 Type self = typeof(MpSeedBroadcast);
-                harmony.Patch(_mAnnounceSeed, prefix: new HarmonyMethod(
-                    self.GetMethod(nameof(AnnounceSeed_Prefix), BindingFlags.Static | BindingFlags.NonPublic)));
-                harmony.Patch(_mSeedReceiver, postfix: new HarmonyMethod(
-                    self.GetMethod(nameof(SeedAnnounce_Postfix), BindingFlags.Static | BindingFlags.NonPublic)));
+                if (!HasPatch(Harmony.GetPatchInfo(_mAnnounceSeed)?.Prefixes, harmony.Id, nameof(AnnounceSeed_Prefix)))
+                {
+                    harmony.Patch(_mAnnounceSeed, prefix: new HarmonyMethod(
+                        self.GetMethod(nameof(AnnounceSeed_Prefix), BindingFlags.Static | BindingFlags.NonPublic)));
+                }
+                if (!HasPatch(Harmony.GetPatchInfo(_mSeedReceiver)?.Postfixes, harmony.Id, nameof(SeedAnnounce_Postfix)))
+                {
+                    harmony.Patch(_mSeedReceiver, postfix: new HarmonyMethod(
+                        self.GetMethod(nameof(SeedAnnounce_Postfix), BindingFlags.Static | BindingFlags.NonPublic)));
+                }
                 _patched = true;
                 ModLog.Info("多人种子广播已挂载（Together.ServerMain.Server_AnnounceSeed / ClientReceiver）");
             }
@@ -146,6 +152,16 @@ namespace CasualtiesUnknown.SaveManager
         }
 
         internal static void ResetPatchState() => _patched = false;
+
+        private static bool HasPatch(IReadOnlyCollection<Patch> patches, string ownerId, string methodName)
+        {
+            if (patches == null) return false;
+            foreach (Patch p in patches)
+            {
+                if (p.owner == ownerId && p.PatchMethod?.Name == methodName) return true;
+            }
+            return false;
+        }
 
         private static byte ResolveSeedMessageId(Type msgIdType, List<string> missing)
         {

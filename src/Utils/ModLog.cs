@@ -4,10 +4,10 @@ using BepInEx.Logging;
 
 namespace CasualtiesUnknown.SaveManager
 {
-    /// <summary>统一日志出口，输出到 BepInEx 日志并按配置同步到游戏内控制台。</summary>
+    /// <summary>统一日志出口：BepInEx 通道直接利用源标签避免重复前缀，游戏内控制台统一加 [SaveManager] 前缀。</summary>
     internal static class ModLog
     {
-        private const string Prefix = "[SaveManager] ";
+        private const string ConsolePrefix = "[SaveManager] ";
 
         private static ManualLogSource _sink;
         private static MethodInfo _consoleLog;
@@ -35,21 +35,20 @@ namespace CasualtiesUnknown.SaveManager
             WriteToConsole(message, "red");
         }
 
-        /// <summary>Debug 构建诊断日志；BepInEx 默认屏蔽 LogDebug，故走 LogInfo 写入日志文件。</summary>
+        /// <summary>BepInEx 默认屏蔽 LogDebug，故走 LogInfo 加 [DBG] 标记落盘。</summary>
         [Conditional("DEBUG")]
         internal static void Debug(string message)
         {
 #if DEBUG
-            _sink?.LogInfo(Prefix + "[DBG] " + message);
+            _sink?.LogInfo("[DBG] " + message);
 #endif
         }
 
-        /// <summary>Debug 构建流程步骤日志。</summary>
         [Conditional("DEBUG")]
         internal static void Flow(string scope, string step, string message)
         {
 #if DEBUG
-            _sink?.LogInfo(Prefix + "[DBG][" + scope + "] " + step + " " + message);
+            _sink?.LogInfo("[DBG][" + scope + "] " + step + " " + message);
 #endif
         }
 
@@ -60,7 +59,9 @@ namespace CasualtiesUnknown.SaveManager
             {
                 var instance = ConsoleScript.instance;
                 if (instance == null || !ResolveConsoleLog()) return;
-                string text = string.IsNullOrEmpty(color) ? Prefix + message : $"<color={color}>{Prefix}{message}</color>";
+                string text = string.IsNullOrEmpty(color)
+                    ? ConsolePrefix + message
+                    : $"<color={color}>{ConsolePrefix}{message}</color>";
                 _consoleLog.Invoke(instance, new object[] { text });
             }
             catch { }

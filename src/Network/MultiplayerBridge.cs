@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using System.Reflection;
 using CasualtiesUnknown.SaveManager.Interop;
@@ -40,57 +39,30 @@ namespace CasualtiesUnknown.SaveManager
 
         /// <summary>本机玩家在联机模组中的持久 ID；不可用时返回 null。</summary>
         internal static string GetLocalPersistentId()
-        {
-            return Provider.TryGetLocalPersistentId(out string persistentId) ? persistentId : null;
-        }
+            => Provider.TryGetLocalPersistentId(out string persistentId) ? persistentId : null;
 
         /// <summary>获取当前联机会话内全部玩家的身份快照；不可用时返回空列表。</summary>
         internal static List<InteropPlayerIdentity> GetSessionPlayerIdentities()
-        {
-            return Provider.GetPlayerIdentities();
-        }
+            => Provider.GetPlayerIdentities();
 
         /// <summary>服务端按持久 ID 将在线玩家传送到目标回档坐标，返回实际传送人数。</summary>
         internal static int RestorePlayerPositions(Dictionary<string, Vector2> positions)
-        {
-            if (positions == null || positions.Count == 0)
-            {
-                return 0;
-            }
-
-            try
-            {
-                return Provider.RestorePlayerPositions(positions);
-            }
-            catch (Exception ex)
-            {
-                ModLog.Warning($"RestorePlayerPositions 失败：{ex.Message}");
-                return 0;
-            }
-        }
+            => positions == null || positions.Count == 0 ? 0 : Provider.RestorePlayerPositions(positions);
 
         /// <summary>触发存档流程把当前联机状态写入 mp_save。</summary>
         internal static bool TrySaveMpGame() => GameSaveBridge.TrySaveGame();
 
-        /// <summary>当目标槽位采用联机原生引擎（krok）时记录回档准备日志。</summary>
+        /// <summary>当目标槽位采用联机原生引擎（krok）时记录回档准备日志与联机状态消息。</summary>
         internal static void PrepareMpRollback(SlotSidecar sidecar)
         {
-            if (sidecar == null)
+            if (sidecar == null || WorldEngineArbiter.ResolveSidecarEngine(sidecar) != "krok")
             {
                 return;
             }
 
-            string rawEngine = !string.IsNullOrEmpty(sidecar.WorldEngine)
-                ? sidecar.WorldEngine
-                : (!string.IsNullOrEmpty(sidecar.MpWorldEngine) ? sidecar.MpWorldEngine : null);
-            if (WorldEngineArbiter.ResolveEffectiveEngineName(rawEngine) != "krok")
-            {
-                return;
-            }
-
-            const string Message = "存档/位置交由联机模组继续游戏恢复";
-            ModLog.Info("联机引擎：" + Message);
-            Provider.TryLogStatusMessage(Message);
+            string message = I18n.T("mp.krok_continue_handoff");
+            ModLog.Info(message);
+            Provider.TryLogStatusMessage(message);
         }
 
         /// <summary>通过 Together.WorldMP.LoadVanillaGeneratedWorld(bool) 执行联机继续游戏；仅服务端或未开房时可用。</summary>
@@ -100,74 +72,36 @@ namespace CasualtiesUnknown.SaveManager
                 + " modInitialized=" + Provider.IsModInitialized
                 + " running=" + Provider.IsRunning
                 + " isServer=" + Provider.IsServer);
-            try
+
+            if (!Provider.IsModInitialized)
             {
-                if (!Provider.IsModInitialized)
-                {
-                    ModLog.Debug("TryLoadMultiplayerContinue：联机模组未初始化 → 跳过");
-                    return false;
-                }
-
-                if (Provider.IsRunning && !Provider.IsServer)
-                {
-                    ModLog.Debug("TryLoadMultiplayerContinue：本端为客户端 → 跳过");
-                    return false;
-                }
-
-                if (!Provider.TryContinueGame(loadsave))
-                {
-                    ModLog.Warning("TryLoadMultiplayerContinue：联机模组的读档继续游戏不可用，本次不改变场景");
-                    return false;
-                }
-
-                ModLog.Info($"已通过联机模组继续游戏（loadsave:{loadsave}）");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                ModLog.Warning($"TryLoadMultiplayerContinue 失败：{ex.Message}");
+                ModLog.Debug("TryLoadMultiplayerContinue：联机模组未初始化 → 跳过");
                 return false;
             }
+
+            if (Provider.IsRunning && !Provider.IsServer)
+            {
+                ModLog.Debug("TryLoadMultiplayerContinue：本端为客户端 → 跳过");
+                return false;
+            }
+
+            if (!Provider.TryContinueGame(loadsave))
+            {
+                ModLog.Warning("TryLoadMultiplayerContinue：联机模组的读档继续游戏不可用，本次不改变场景");
+                return false;
+            }
+
+            ModLog.Info($"已通过联机模组继续游戏（loadsave:{loadsave}）");
+            return true;
         }
 
         /// <summary>获取当前联机会话已死亡玩家人数；不可用时返回 0。</summary>
-        internal static int DeadPlayerCount()
-        {
-            try
-            {
-                return Provider.CountDeadPlayers();
-            }
-            catch
-            {
-                return 0;
-            }
-        }
+        internal static int DeadPlayerCount() => Provider.CountDeadPlayers();
 
         /// <summary>获取当前联机会话存活玩家人数；不可用时返回 -1。</summary>
-        internal static int LivingPlayerCount()
-        {
-            try
-            {
-                return Provider.CountLivingPlayers();
-            }
-            catch
-            {
-                return -1;
-            }
-        }
+        internal static int LivingPlayerCount() => Provider.CountLivingPlayers();
 
         /// <summary>服务端向全员广播屏幕中央提示；失败返回 false。</summary>
-        internal static bool TryAnnounceAlert(string msg)
-        {
-            try
-            {
-                return Provider.TryAnnounceAlert(msg);
-            }
-            catch (Exception ex)
-            {
-                ModLog.Warning($"TryAnnounceAlert 失败：{ex.Message}");
-                return false;
-            }
-        }
+        internal static bool TryAnnounceAlert(string msg) => Provider.TryAnnounceAlert(msg);
     }
 }

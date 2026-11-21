@@ -44,8 +44,25 @@ namespace CasualtiesUnknown.SaveManager
 
                 ResolveReclaimGearSupport(netBodyType);
 
-                Harmony harmony = new Harmony("com.casualtiesUnknown.saveManager.mpLateSpawnSuppressor");
-                harmony.Patch(lateSpawn, prefix: new HarmonyMethod(typeof(MpLateSpawnSuppressor), nameof(SkipWhenRestoring)));
+                Harmony harmony = HarmonyBootstrap.Instance;
+                Patches info = Harmony.GetPatchInfo(lateSpawn);
+                bool exists = false;
+                if (info?.Prefixes != null)
+                {
+                    foreach (Patch p in info.Prefixes)
+                    {
+                        if (p.owner == harmony.Id && p.PatchMethod?.Name == nameof(SkipWhenRestoring))
+                        {
+                            exists = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!exists)
+                {
+                    harmony.Patch(lateSpawn, prefix: new HarmonyMethod(typeof(MpLateSpawnSuppressor), nameof(SkipWhenRestoring)));
+                }
                 _patched = true;
                 ModLog.Info("多人 LateSpawnLocation 抑制已挂载");
             }

@@ -1,3 +1,4 @@
+using System;
 using System.IO;
 
 namespace CasualtiesUnknown.SaveManager
@@ -15,10 +16,10 @@ namespace CasualtiesUnknown.SaveManager
 
         internal SlotInfo(FileInfo file, SlotSidecar sidecar, string dateFolder, string runIdFolder)
         {
-            File = file;
-            Sidecar = sidecar;
-            DateFolder = dateFolder;
-            RunIdFolder = runIdFolder;
+            File = file ?? throw new ArgumentNullException(nameof(file));
+            Sidecar = sidecar ?? new SlotSidecar();
+            DateFolder = dateFolder ?? "";
+            RunIdFolder = runIdFolder ?? "";
         }
 
         internal string DisplayName

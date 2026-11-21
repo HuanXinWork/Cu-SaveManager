@@ -62,12 +62,12 @@ namespace CasualtiesUnknown.SaveManager
                     return;
                 }
 
-                new SaveStore().PrepareCurrentSaveForContinue();
+                (Plugin.SharedStore ?? new SaveStore()).PrepareCurrentSaveForContinue();
                 ModLog.Flow("LoadRun", "04", "单机世界准备完成");
             }
             catch (Exception ex)
             {
-                ModLog.Warning($"ContinueGameLoadPatch 失败：{ex.Message}");
+                ModLog.Warning($"ContinueGameLoadPatch 失败：{ex}");
             }
         }
     }

@@ -1,22 +1,39 @@
 using System;
 using HarmonyLib;
+using UnityEngine;
 
 namespace CasualtiesUnknown.SaveManager
 {
     /// <summary>多人回档两阶段状态控制：先由主机携全员退回主菜单，待客户端同步回大厅后再发起继续游戏。</summary>
     internal static class MpRollbackController
     {
+        private const float PendingReloadTimeoutSeconds = 15f;
+
         private static bool _pendingHostReload;
+        private static float _pendingReloadDeadline;
 
         /// <summary>主机正在执行回档退回主菜单的窗口标志，供 GameAutoRespawnGuard 放行 ToMainMenu。</summary>
         internal static bool ReturningToMenu { get; private set; }
 
-        /// <summary>多人两阶段回档是否仍处于挂起推进中（阶段一退回大厅或阶段二等待进图）。</summary>
-        internal static bool IsPendingReload => _pendingHostReload || ReturningToMenu;
+        /// <summary>多人两阶段回档是否仍处于挂起推进中；阶段一超 15s 未回大厅则自动超时复位。</summary>
+        internal static bool IsPendingReload
+        {
+            get
+            {
+                if (_pendingHostReload && Time.unscaledTime > _pendingReloadDeadline)
+                {
+                    _pendingHostReload = false;
+                    ModLog.Warning("多人回档阶段一等待主菜单超时，已自动中止挂起回档");
+                    AbortPendingRestore();
+                }
+                return _pendingHostReload || ReturningToMenu;
+            }
+        }
 
         internal static void TriggerHostReload()
         {
             _pendingHostReload = true;
+            _pendingReloadDeadline = Time.unscaledTime + PendingReloadTimeoutSeconds;
             ModLog.Info(I18n.T("mp.rollback_returning_menu"));
             ModLog.Debug("多人回档阶段一：置待回档标志并调用 ToMainMenu");
             ReturningToMenu = true;
@@ -50,6 +67,7 @@ namespace CasualtiesUnknown.SaveManager
         {
             if (!_pendingHostReload) return;
             _pendingHostReload = false;
+            _pendingReloadDeadline = 0f;
             ModLog.Debug("多人回档阶段二：PreRunScript 就绪 isServer=" + MultiplayerBridge.IsServer());
             if (!MultiplayerBridge.IsServer())
             {
@@ -101,9 +119,11 @@ namespace CasualtiesUnknown.SaveManager
 
         private static void AbortPendingRestore()
         {
+            _pendingReloadDeadline = 0f;
             MultiplayerBridge.SetPendingLoadMpSave(false);
-            ApplyLayerModifiersRestorePatch.PendingIndex = -2;
+            PendingLoadContext.ClearAll();
             MpPositionRestorer.CancelSession();
+            RollbackController.NotifyReloadAborted();
         }
     }
 
@@ -112,6 +132,7 @@ namespace CasualtiesUnknown.SaveManager
     {
         private static void Postfix()
         {
+            HarmonyBootstrap.TryPatchMainMenuDeferred();
             MpRollbackController.OnPreRunReady();
         }
     }

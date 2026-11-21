@@ -11,21 +11,33 @@ namespace CasualtiesUnknown.SaveManager
     internal static class LoadRunPrefixReplacer
     {
         private const string ClientCannotStartMessage = "You can't start the game, server can.";
+        private const string ClientCannotLoadMessage = "Only the host can load a save.";
         private const string NoSaveMessage = "No save file to load.";
         private const int PatchPriority = 700;
 
+        private static bool _patched;
         private static bool _resolveTried;
         private static bool _hasCharacterSelectWait;
         private static MethodInfo _mDeleteMpSave;
 
+        internal static void ResetPatchState()
+        {
+            _patched = false;
+            _resolveTried = false;
+            _hasCharacterSelectWait = false;
+            _mDeleteMpSave = null;
+        }
+
+        internal static void TryPatch() => TryPatch(HarmonyBootstrap.Instance);
+
         internal static void TryPatch(Harmony harmony)
         {
-            if (harmony == null)
+            if (_patched)
             {
                 return;
             }
 
-            ApplyLayerModifiersRestorePatch.BindHarmony(harmony);
+            harmony = harmony ?? HarmonyBootstrap.Instance;
 
             try
             {
@@ -46,6 +58,7 @@ namespace CasualtiesUnknown.SaveManager
 
                 bool loadRunPatched = PatchRunMethod(harmony, nameof(LoadRun_Prefix), loadRun);
                 bool startRunPatched = PatchRunMethod(harmony, nameof(StartRun_Prefix), startRun);
+                _patched = loadRunPatched && startRunPatched;
 
                 ModLog.Debug("LoadRunPrefixReplacer：目标 LoadRun=" + DescribeMethod(loadRun) + " StartRun=" + DescribeMethod(startRun)
                     + "；priority=" + PatchPriority
@@ -115,7 +128,7 @@ namespace CasualtiesUnknown.SaveManager
                     .Append('(').Append(ordered[i].priority).Append(')');
             }
 
-            ModLog.Info($"{label} Prefix 执行顺序：{chain}");
+            ModLog.Debug($"{label} Prefix 执行顺序：{chain}");
 
             int mine = Array.FindIndex(ordered, p => p.owner != null
                 && p.owner.StartsWith("com.casualtiesUnknown.saveManager", StringComparison.Ordinal)
@@ -165,6 +178,15 @@ namespace CasualtiesUnknown.SaveManager
                     RunSettingsBridge.RestoreFromSaveFile(mp);
                     RestoreMpWorldSeed();
                 }
+                else if (!_hasCharacterSelectWait)
+                {
+                    ModLog.Flow("LoadRun", "22", "联机运行（无准备大厅）且本端为客户端 → 拦截");
+                    string localized = I18n.T("mp.client_cannot_load_run");
+                    StatusLog(string.IsNullOrEmpty(localized) || localized == "mp.client_cannot_load_run"
+                        ? ClientCannotLoadMessage
+                        : localized);
+                    return false;
+                }
                 else
                 {
                     ModLog.Flow("LoadRun", "22", "联机客户端 → 放行联机模组（等待主机继续）");
@@ -178,7 +200,10 @@ namespace CasualtiesUnknown.SaveManager
             if (!hasSave)
             {
                 ModLog.Flow("LoadRun", "23", "未运行且没有可用存档 → 拦截");
-                StatusLog(NoSaveMessage);
+                string localized = I18n.T("msg.no_save_to_load");
+                StatusLog(string.IsNullOrEmpty(localized) || localized == "msg.no_save_to_load"
+                    ? NoSaveMessage
+                    : localized);
                 return false;
             }
 
@@ -232,7 +257,10 @@ namespace CasualtiesUnknown.SaveManager
             if (!MultiplayerBridge.IsServer())
             {
                 ModLog.Flow("StartRun", "02", "联机运行（无准备大厅）且本端为客户端 → 拦截");
-                StatusLog(ClientCannotStartMessage);
+                string localized = I18n.T("mp.client_cannot_start_run");
+                StatusLog(string.IsNullOrEmpty(localized) || localized == "mp.client_cannot_start_run"
+                    ? ClientCannotStartMessage
+                    : localized);
                 return false;
             }
 
@@ -274,6 +302,11 @@ namespace CasualtiesUnknown.SaveManager
 
         private static void DeleteMpSave()
         {
+            if (!MpSaveLocator.HasMpSave())
+            {
+                return;
+            }
+
             if (_mDeleteMpSave == null)
             {
                 InteropDiagnostics.WarnOnce("LoadRunPrefixReplacer.DeleteMPSave",
@@ -281,6 +314,19 @@ namespace CasualtiesUnknown.SaveManager
                 return;
             }
 
+            if (Plugin.ShouldBackupBeforeOverwrite && MpSaveLocator.HasMpSave())
+            {
+                try
+                {
+                    Plugin.SharedStore?.BackupCurrentMpSaveBeforeOverwrite();
+                }
+                catch (Exception ex)
+                {
+                    ModLog.Warning($"清空旧 mp_save 前自动备份失败：{ex.Message}");
+                }
+            }
+
+            ModLog.Info("联机主机开新局（无准备大厅兜底）：正在清空旧 mp_save 存档");
             if (!InteropReflection.TryInvoke(_mDeleteMpSave, null, Array.Empty<object>(), out object _))
             {
                 ModLog.Warning("Together.SavesystemPatch.DeleteMPSave() 调用失败，旧 mp_save 未清空");

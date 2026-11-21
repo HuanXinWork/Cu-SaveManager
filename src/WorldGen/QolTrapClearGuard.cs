@@ -1,5 +1,6 @@
 using System;
 using System.Reflection;
+using CasualtiesUnknown.SaveManager.Interop;
 using HarmonyLib;
 
 namespace CasualtiesUnknown.SaveManager
@@ -8,16 +9,31 @@ namespace CasualtiesUnknown.SaveManager
     internal static class QolTrapClearGuard
     {
         private static bool _patched;
+        private static bool _absentCached;
 
-        internal static void ResetPatchState() => _patched = false;
+        internal static void ResetPatchState()
+        {
+            _patched = false;
+            _absentCached = false;
+        }
 
         internal static void TryPatch()
         {
-            if (_patched) return;
+            if (_patched || _absentCached) return;
+            if (!QolBridge.IsQolPresent())
+            {
+                if (InteropBootstrap.PluginScanComplete) _absentCached = true;
+                return;
+            }
             try
             {
-                Type t = AccessTools.TypeByName("QoL_Unknown.SeededRunPatcher");
-                if (t == null) return;
+                Type t = InteropBootstrap.Qol.TryResolveType("QoL_Unknown.SeededRunPatcher")
+                    ?? AccessTools.TypeByName("QoL_Unknown.SeededRunPatcher");
+                if (t == null)
+                {
+                    if (InteropBootstrap.PluginScanComplete) _absentCached = true;
+                    return;
+                }
 
                 MethodInfo m = t.GetMethod("RemoveNearbyTrapsLikeVanilla",
                     BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
@@ -28,9 +44,26 @@ namespace CasualtiesUnknown.SaveManager
                     return;
                 }
 
-                var harmony = new Harmony("com.casualtiesUnknown.saveManager.qolTrapClearGuard");
-                harmony.Patch(m, prefix: new HarmonyMethod(typeof(QolTrapClearGuard).GetMethod(
-                    nameof(SafeClearInstead), BindingFlags.Static | BindingFlags.NonPublic)));
+                Harmony harmony = HarmonyBootstrap.Instance;
+                Patches info = Harmony.GetPatchInfo(m);
+                bool exists = false;
+                if (info?.Prefixes != null)
+                {
+                    foreach (Patch p in info.Prefixes)
+                    {
+                        if (p.owner == harmony.Id && p.PatchMethod?.Name == nameof(SafeClearInstead))
+                        {
+                            exists = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!exists)
+                {
+                    harmony.Patch(m, prefix: new HarmonyMethod(typeof(QolTrapClearGuard).GetMethod(
+                        nameof(SafeClearInstead), BindingFlags.Static | BindingFlags.NonPublic)));
+                }
                 _patched = true;
                 ModLog.Info("QoL 出生清陷阱接管已挂载（仅 self 引擎启用时生效）");
             }

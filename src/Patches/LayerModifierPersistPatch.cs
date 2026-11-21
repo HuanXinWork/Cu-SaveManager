@@ -1,5 +1,6 @@
 using System;
 using System.Reflection;
+using CasualtiesUnknown.SaveManager.Interop;
 using HarmonyLib;
 
 namespace CasualtiesUnknown.SaveManager
@@ -8,9 +9,6 @@ namespace CasualtiesUnknown.SaveManager
     [HarmonyPatch(typeof(WorldGeneration), "ApplyLayerModifiers")]
     internal static class ApplyLayerModifiersRestorePatch
     {
-        /// <summary>-2 无待还原状态；-1 明确无词条；&gt;=0 目标 <c>modifierIndex</c>。</summary>
-        internal static int PendingIndex = -2;
-
         private static readonly FieldInfo PrefixField = AccessTools.Field(typeof(WorldGeneration), "layerPrefix");
         private static readonly FieldInfo DescField = AccessTools.Field(typeof(WorldGeneration), "layerDescription");
 
@@ -20,8 +18,7 @@ namespace CasualtiesUnknown.SaveManager
 
         internal static void BindHarmony(Harmony harmony)
         {
-            if (harmony == null) return;
-            _boundHarmony = harmony;
+            _boundHarmony = harmony ?? HarmonyBootstrap.Instance;
             EnsureQolPrefixPatched();
         }
 
@@ -30,16 +27,16 @@ namespace CasualtiesUnknown.SaveManager
             _boundHarmony = null;
             _qolResolveFailed = false;
             _suppressQolThisCall = false;
-            PendingIndex = -2;
+            PendingLoadContext.LayerModifierIndex = -2;
         }
 
         [HarmonyPrefix]
         [HarmonyPriority(Priority.First)]
         private static bool Prefix(WorldGeneration __instance)
         {
-            if (PendingIndex == -2) return true;
-            int idx = PendingIndex;
-            PendingIndex = -2;
+            if (PendingLoadContext.LayerModifierIndex == -2) return true;
+            int idx = PendingLoadContext.LayerModifierIndex;
+            PendingLoadContext.LayerModifierIndex = -2;
             _suppressQolThisCall = true;
             EnsureQolPrefixPatched();
 
@@ -68,12 +65,9 @@ namespace CasualtiesUnknown.SaveManager
                         break;
                     }
                 }
-                if (target == null && idx < mods.Length)
-                    target = mods[idx];
-
                 if (target == null)
                 {
-                    ModLog.Warning($"LayerModifierRestorePatch: 未找到词条 idx={idx} len={mods.Length}");
+                    ModLog.Warning($"LayerModifierRestorePatch: 未找到匹配词条 modifierIndex={idx} len={mods.Length}");
                     return false;
                 }
 
@@ -98,14 +92,28 @@ namespace CasualtiesUnknown.SaveManager
 
         private static void EnsureQolPrefixPatched()
         {
-            if (_qolResolveFailed || _boundHarmony == null) return;
+            if (_qolResolveFailed) return;
+            if (!QolBridge.IsQolPresent())
+            {
+                if (InteropBootstrap.PluginScanComplete)
+                {
+                    _qolResolveFailed = true;
+                }
+                return;
+            }
+
             try
             {
-                Type type = AccessTools.TypeByName("QoL_Unknown.LayerModifierPatcher");
+                Harmony harmony = _boundHarmony ?? HarmonyBootstrap.Instance;
+                Type type = InteropBootstrap.Qol.TryResolveType("QoL_Unknown.LayerModifierPatcher")
+                    ?? AccessTools.TypeByName("QoL_Unknown.LayerModifierPatcher");
                 MethodInfo qolPrefix = type == null ? null : AccessTools.Method(type, "ApplyLayerModifiers_Prefix");
                 if (qolPrefix == null)
                 {
                     _qolResolveFailed = true;
+                    InteropDiagnostics.WarnOnce(
+                        "ApplyLayerModifiersRestorePatch.QolPrefix",
+                        "QoL 已加载但未找到 QoL_Unknown.LayerModifierPatcher.ApplyLayerModifiers_Prefix，词条重掷短路守卫未生效");
                     return;
                 }
 
@@ -118,14 +126,14 @@ namespace CasualtiesUnknown.SaveManager
                 {
                     foreach (Patch patch in info.Prefixes)
                     {
-                        if (patch.owner == _boundHarmony.Id && patch.PatchMethod?.Name == handlerName)
+                        if (patch.owner == harmony.Id && patch.PatchMethod?.Name == handlerName)
                             return;
                     }
                 }
 
                 MethodInfo guard = typeof(ApplyLayerModifiersRestorePatch).GetMethod(
                     handlerName, BindingFlags.Static | BindingFlags.NonPublic);
-                _boundHarmony.Patch(qolPrefix, prefix: new HarmonyMethod(guard));
+                harmony.Patch(qolPrefix, prefix: new HarmonyMethod(guard));
                 ModLog.Info("已挂载 QoL LayerModifierPatcher.ApplyLayerModifiers_Prefix 按需短路守卫");
             }
             catch (Exception ex)

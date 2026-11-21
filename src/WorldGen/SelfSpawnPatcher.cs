@@ -22,38 +22,6 @@ namespace CasualtiesUnknown.SaveManager
             "thornbackyoung", "wallbiter"
         };
 
-        /// <summary>读档或回档前注入的玩家目标世界坐标，协程收尾消费后清空。</summary>
-        internal static Vector3? PendingPosition;
-
-        private sealed class CompletionEnumerator : IEnumerator, IDisposable
-        {
-            private readonly IEnumerator _inner;
-            private readonly Action _onCompleted;
-            private bool _completed;
-
-            internal CompletionEnumerator(IEnumerator inner, Action onCompleted)
-            {
-                _inner = inner;
-                _onCompleted = onCompleted;
-            }
-
-            public object Current => _inner.Current;
-
-            public bool MoveNext()
-            {
-                bool hasNext = _inner.MoveNext();
-                if (!hasNext && !_completed)
-                {
-                    _completed = true;
-                    _onCompleted?.Invoke();
-                }
-                return hasNext;
-            }
-
-            public void Reset() => _inner.Reset();
-            public void Dispose() => (_inner as IDisposable)?.Dispose();
-        }
-
         private static void Postfix(ref IEnumerator __result)
         {
             if (__result == null)
@@ -66,12 +34,19 @@ namespace CasualtiesUnknown.SaveManager
 
         private static void OnFinishWorldGenerationCompleted()
         {
-            if (MultiplayerBridge.IsMultiplayerRunning()) return;
-            if (!SeededWorldEngine.IsActive) return;
-            if (WorldGeneration.world == null || PlayerCamera.main == null || PlayerCamera.main.body == null) return;
+            if (MultiplayerBridge.IsMultiplayerRunning() || !SeededWorldEngine.IsActive)
+            {
+                PendingLoadContext.SpawnPosition = null;
+                return;
+            }
+            if (WorldGeneration.world == null || PlayerCamera.main == null || PlayerCamera.main.body == null)
+            {
+                PendingLoadContext.SpawnPosition = null;
+                return;
+            }
             try
             {
-                if (PendingPosition.HasValue)
+                if (PendingLoadContext.SpawnPosition.HasValue)
                 {
                     ApplyPendingPosition();
                     return;
@@ -94,21 +69,20 @@ namespace CasualtiesUnknown.SaveManager
         {
             if (SaveSystem.loadedRun) return false;
             if (WorldGeneration.world == null) return false;
+            // totalTraveled 单位为累计米数（过首层即 >= 76m），仅第 0 层新开局跳过。
             return WorldGeneration.world.totalTraveled < 50;
         }
 
         private static void ApplyPendingPosition()
         {
-            if (!PendingPosition.HasValue) return;
-            Vector3 pos = PendingPosition.Value;
-            if (PlayerCamera.main != null && PlayerCamera.main.body != null)
+            if (!PendingLoadContext.SpawnPosition.HasValue) return;
+            Vector3 pos = PendingLoadContext.SpawnPosition.Value;
+            PendingLoadContext.SpawnPosition = null;
+            if (LocalPlayerTeleporter.TryMoveTo(pos, forceZeroZ: false))
             {
-                PlayerCamera.main.body.transform.position = pos;
-                PlayerCamera.main.transform.position = new Vector3(pos.x, pos.y, -10f);
-                if (PlayerCamera.main.body.rb != null) PlayerCamera.main.body.rb.velocity = Vector2.zero;
-                ModLog.Info($"回档位置写回：目标({pos.x:0.0},{pos.y:0.0}) 实际({PlayerCamera.main.body.transform.position.x:0.0},{PlayerCamera.main.body.transform.position.y:0.0})");
+                Vector3 actual = PlayerCamera.main.body.transform.position;
+                ModLog.Info($"回档位置写回：目标({pos.x:0.0},{pos.y:0.0}) 实际({actual.x:0.0},{actual.y:0.0})");
             }
-            PendingPosition = null;
         }
 
         private static void KeepEldersAwayFromSpawn(Vector2 spawnPos, float minRadius)
@@ -119,13 +93,15 @@ namespace CasualtiesUnknown.SaveManager
 
             int w = (int)world.width;
             int h = (int)world.height;
-            var all = UnityEngine.Object.FindObjectsOfType<Transform>();
-            foreach (var t in all)
+            float minRadiusSqr = minRadius * minRadius;
+            var bodies = UnityEngine.Object.FindObjectsOfType<Body>();
+            foreach (var b in bodies)
             {
-                if (t == null || t.gameObject == null) continue;
-                if (!t.gameObject.name.Contains("thornbackelder")) continue;
+                if (b == null || b.gameObject == null) continue;
+                if (b.gameObject.name.IndexOf("thornbackelder", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                Transform t = b.transform;
                 Vector2 d = (Vector2)t.position - spawnPos;
-                if (d.sqrMagnitude >= minRadius * minRadius) continue;
+                if (d.sqrMagnitude >= minRadiusSqr) continue;
                 if (TryFindValidElderPositionAwayFromSpawn(blocks, w, h, spawnPos, minRadius, out var pos))
                 {
                     t.position = new Vector3(pos.x, pos.y, t.position.z);
@@ -191,33 +167,66 @@ namespace CasualtiesUnknown.SaveManager
         {
             if (PlayerCamera.main == null || PlayerCamera.main.body == null) return;
             Vector2 origin = PlayerCamera.main.body.transform.position;
-            const float sqrRadius = 144f;
-            var all = UnityEngine.Object.FindObjectsOfType<Transform>();
-            foreach (var t in all)
+            bool inTopSpawnZone = WorldGeneration.world != null && origin.y >= WorldGeneration.world.height * 0.25f;
+
+            var buildings = UnityEngine.Object.FindObjectsOfType<BuildingEntity>();
+            foreach (var be in buildings)
             {
-                if (t == null || t.gameObject == null || !IsTrapObject(t.gameObject)) continue;
+                if (be == null || be.gameObject == null || !IsTrapBuilding(be)) continue;
+                var attachedItem = be.GetComponent<Item>();
+                if (attachedItem != null && ShouldPreserveHeldOrContainerItem(attachedItem)) continue;
+                if (ShouldDestroyTrapAt(be.transform.position, origin, inTopSpawnZone))
+                {
+                    UnityEngine.Object.Destroy(be.gameObject);
+                }
+            }
+
+            var items = UnityEngine.Object.FindObjectsOfType<Item>();
+            foreach (var item in items)
+            {
+                if (item == null || item.gameObject == null || !IsTrapItem(item)) continue;
                 // TrapEntityIds 含抗辐射药（antirad），须跳过玩家手持、穿戴及任意层级容器内的随身物品。
-                if (ShouldPreserveHeldOrContainerItem(t)) continue;
-                Vector2 d = (Vector2)t.position - origin;
-                bool near = d.sqrMagnitude <= sqrRadius;
-                bool aboveFloor = t.position.y > origin.y - 5f;
-                if (near || aboveFloor) UnityEngine.Object.Destroy(t.gameObject);
+                if (ShouldPreserveHeldOrContainerItem(item)) continue;
+                if (ShouldDestroyTrapAt(item.transform.position, origin, inTopSpawnZone))
+                {
+                    UnityEngine.Object.Destroy(item.gameObject);
+                }
             }
         }
 
-        private static bool ShouldPreserveHeldOrContainerItem(Transform t)
+        private static bool ShouldDestroyTrapAt(Vector3 pos, Vector2 origin, bool inTopSpawnZone)
         {
-            if (t.GetComponent<Item>() == null) return false;
+            const float sqrRadius = 144f;
+            Vector2 d = (Vector2)pos - origin;
+            bool near = d.sqrMagnitude <= sqrRadius;
+            if (inTopSpawnZone)
+            {
+                bool aboveFloor = pos.y > origin.y - 5f;
+                return near || aboveFloor;
+            }
+            // 位于地图中下部落地时仅清理近身与头顶局部安全柱，防止落石砸脸且避免误删上方整层陷阱。
+            return near || (Mathf.Abs(d.x) <= 12f && pos.y > origin.y - 5f && pos.y <= origin.y + 24f);
+        }
+
+        private static bool ShouldPreserveHeldOrContainerItem(Item item)
+        {
+            if (item == null) return false;
+            Transform t = item.transform;
             return t.GetComponentInParent<Body>() != null || t.GetComponentInParent<Container>() != null;
         }
 
-        private static bool IsTrapObject(GameObject obj)
+        private static bool IsTrapBuilding(BuildingEntity be)
         {
-            if (obj == null) return false;
-            if (TrapEntityIds.Contains(NormalizeEntityId(obj.name))) return true;
-            var be = obj.GetComponent<BuildingEntity>();
-            if (be == null || string.IsNullOrEmpty(be.id)) return false;
-            return TrapEntityIds.Contains(NormalizeEntityId(be.id));
+            if (be == null || be.gameObject == null) return false;
+            if (!string.IsNullOrEmpty(be.id) && TrapEntityIds.Contains(NormalizeEntityId(be.id))) return true;
+            return TrapEntityIds.Contains(NormalizeEntityId(be.gameObject.name));
+        }
+
+        private static bool IsTrapItem(Item item)
+        {
+            if (item == null || item.gameObject == null) return false;
+            if (!string.IsNullOrEmpty(item.id) && TrapEntityIds.Contains(NormalizeEntityId(item.id))) return true;
+            return TrapEntityIds.Contains(NormalizeEntityId(item.gameObject.name));
         }
 
         private static string NormalizeEntityId(string value)
@@ -237,9 +246,7 @@ namespace CasualtiesUnknown.SaveManager
             if (IsStandLocationValid(blocks, w, h, start.x, start.y)) return;
             if (!TryFindNearestOpenLand(blocks, w, h, start, 80, out var found)) return;
             var dst = new Vector3(found.x, found.y, p.z);
-            PlayerCamera.main.body.transform.position = dst;
-            PlayerCamera.main.transform.position = new Vector3(dst.x, dst.y, -10f);
-            if (PlayerCamera.main.body.rb != null) PlayerCamera.main.body.rb.velocity = Vector2.zero;
+            LocalPlayerTeleporter.TryMoveTo(dst, forceZeroZ: false);
         }
 
         private static bool TryFindNearestOpenLand(ushort[,] blocks, int w, int h, Vector2Int start, int maxRadius, out Vector2Int found)

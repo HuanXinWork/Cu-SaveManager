@@ -1,5 +1,6 @@
 using System;
 using System.Reflection;
+using CasualtiesUnknown.SaveManager.Interop;
 using HarmonyLib;
 
 namespace CasualtiesUnknown.SaveManager
@@ -15,18 +16,33 @@ namespace CasualtiesUnknown.SaveManager
         };
 
         private static bool _patched;
+        private static bool _absentCached;
 
-        internal static void ResetPatchState() => _patched = false;
+        internal static void ResetPatchState()
+        {
+            _patched = false;
+            _absentCached = false;
+        }
 
         internal static void TryPatch()
         {
-            if (_patched) return;
+            if (_patched || _absentCached) return;
+            if (!QolBridge.IsQolPresent())
+            {
+                if (InteropBootstrap.PluginScanComplete) _absentCached = true;
+                return;
+            }
             try
             {
-                Type t = AccessTools.TypeByName("QoL_Unknown.SeededRunPatcher");
-                if (t == null) return;
+                Type t = InteropBootstrap.Qol.TryResolveType("QoL_Unknown.SeededRunPatcher")
+                    ?? AccessTools.TypeByName("QoL_Unknown.SeededRunPatcher");
+                if (t == null)
+                {
+                    if (InteropBootstrap.PluginScanComplete) _absentCached = true;
+                    return;
+                }
 
-                var harmony = new Harmony("com.casualtiesUnknown.saveManager.qolSpawnSuppressor");
+                Harmony harmony = HarmonyBootstrap.Instance;
                 var skipPrefix = new HarmonyMethod(typeof(QolSpawnSuppressor).GetMethod(
                     nameof(SkipWhenSelfEngine), BindingFlags.Static | BindingFlags.NonPublic));
 
@@ -37,7 +53,10 @@ namespace CasualtiesUnknown.SaveManager
                         BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
                     if (m != null)
                     {
-                        harmony.Patch(m, prefix: skipPrefix);
+                        if (!HasPrefix(m, harmony.Id, nameof(SkipWhenSelfEngine)))
+                        {
+                            harmony.Patch(m, prefix: skipPrefix);
+                        }
                         guardPatched++;
                     }
                 }
@@ -50,8 +69,11 @@ namespace CasualtiesUnknown.SaveManager
                     BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
                 if (worldgenGate != null)
                 {
-                    harmony.Patch(worldgenGate, prefix: new HarmonyMethod(typeof(QolSpawnSuppressor).GetMethod(
-                        nameof(OverrideWorldgenGate), BindingFlags.Static | BindingFlags.NonPublic)));
+                    if (!HasPrefix(worldgenGate, harmony.Id, nameof(OverrideWorldgenGate)))
+                    {
+                        harmony.Patch(worldgenGate, prefix: new HarmonyMethod(typeof(QolSpawnSuppressor).GetMethod(
+                            nameof(OverrideWorldgenGate), BindingFlags.Static | BindingFlags.NonPublic)));
+                    }
                 }
                 else
                 {
@@ -68,6 +90,17 @@ namespace CasualtiesUnknown.SaveManager
             {
                 ModLog.Warning($"QolSpawnSuppressor.TryPatch 失败：{ex.Message}");
             }
+        }
+
+        private static bool HasPrefix(MethodBase target, string ownerId, string methodName)
+        {
+            Patches info = Harmony.GetPatchInfo(target);
+            if (info?.Prefixes == null) return false;
+            foreach (Patch p in info.Prefixes)
+            {
+                if (p.owner == ownerId && p.PatchMethod?.Name == methodName) return true;
+            }
+            return false;
         }
 
         private static bool SkipWhenSelfEngine()
