@@ -190,6 +190,8 @@ namespace CasualtiesUnknown.SaveManager
                     () => { _capturingSlotsKey = false; _capturingQuickKey = false; }, lastRow: true);
                 GUILayout.EndVertical();
 
+                DrawPauseDialSection();
+
                 DrawSectionHeader(I18n.T("sec.misc"));
                 GUILayout.BeginVertical(BlackWhiteSkin.CardStyle);
                 bool newShowLog = DrawSwitch(I18n.T("sw.show_log_in_console"), _cfg.ShowLogInConsole.Value);
@@ -519,6 +521,7 @@ namespace CasualtiesUnknown.SaveManager
                             I18n.InvalidateCache();
                             InvalidateSlotCache();
                             MenuButtonUiInjector.RefreshButtonText();
+                            PauseDialButtonInjector.RefreshTooltipText();
                             GUIUtility.ExitGUI();
                         }
                     }

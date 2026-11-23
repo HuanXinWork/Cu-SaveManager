@@ -116,6 +116,7 @@ namespace CasualtiesUnknown.SaveManager
 
             HarmonyBootstrap.PatchAllIsolated();
             MenuButtonUiInjector.Setup(_openPanelAction);
+            PauseDialButtonInjector.Setup(_cfg, Config, _openPanelAction);
             MpRollbackRunner.Ensure(this);
 
             Action[] deferredPatchers =
@@ -183,6 +184,7 @@ namespace CasualtiesUnknown.SaveManager
             try { _rollback?.Dispose(); } catch { }
             try { HarmonyBootstrap.UnpatchAll(); } catch { }
             try { MenuButtonUiInjector.Dispose(); } catch { }
+            try { PauseDialButtonInjector.Dispose(); } catch { }
             try { OnPanelClosed(); } catch { }
             try { BlackWhiteSkin.Dispose(); } catch { }
             try { Application.quitting -= OnApplicationQuitting; } catch { }

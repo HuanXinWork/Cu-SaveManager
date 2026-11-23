@@ -28,9 +28,11 @@ namespace CasualtiesUnknown.SaveManager
             }
         }
 
-        /// <summary>仅在游戏内暂停菜单可见、且原生设置页与本面板均未打开时返回 true。</summary>
+        /// <summary>仅在暂停表盘按钮未挂载、游戏暂停菜单可见且原生设置页与本面板均未打开时回退显示。</summary>
         internal static bool ShouldShow()
         {
+            // 表盘环形按钮正常挂载后由其接管局内入口，此处仅作为挂载异常时的保底回退。
+            if (PauseDialButtonInjector.IsMounted) return false;
             if (PlayerCamera.main == null || SettingsMenu.instance != null || UiBlocker.IsBlocking) return false;
             return IsGamePaused();
         }
