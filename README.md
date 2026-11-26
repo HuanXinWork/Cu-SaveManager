@@ -1,4 +1,4 @@
-# CuSaveManager V1.3.5 for Casualties: Unknown
+# CuSaveManager V1.3.6 for Casualties: Unknown
 
 > 适配游戏《未知伤亡》的多存档、死亡回档与固定世界模组
 > 兼容：Casualties: Together 联机（5.5.x）、QoL Unknown（缺少不影响基础功能）
@@ -26,7 +26,7 @@ English guide: see [README.en.md](README.en.md)
 
 首次启动会在 `BepInEx/plugins/CuSaveManagerLocales/` 生成默认语言包 `en.json`、`zh.json`；已存在的语言包不会被覆盖。
 
-启动游戏后，主菜单会注入「存档管理」按钮；游戏内可用快捷键或该按钮打开面板。
+启动游戏后，主菜单会注入「存档管理」按钮；局内按 ESC 暂停后，原生暂停表盘外圈会出现圆形像素按钮（支持右键或 Alt+左键拖动换位、悬停滚轮调大小，以及与同系列模组表盘按钮自动避让排布），点击按钮或按快捷键即可打开面板。
 
 ### 面板
 
@@ -34,7 +34,7 @@ English guide: see [README.en.md](README.en.md)
 
 | 标签 | 用途 |
 |------|------|
-| 设置 | 自动备份间隔/份数、死亡回档、固定世界引擎与种子、位置模式、快捷键、杂项 |
+| 设置 | 自动备份间隔/份数、死亡回档、固定世界引擎与种子、位置模式、快捷键、暂停表盘按钮、杂项 |
 | 存档 | 浏览全部槽位（按冒险/日期分组），手动保存、读取、删除 |
 | 回档 | 查看最近槽位并立即回档；死亡回档倒计时也在此取消 |
 | 关于 | 版本、仓库、作者、依赖 |

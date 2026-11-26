@@ -8,7 +8,6 @@ namespace CasualtiesUnknown.SaveManager
 {
     /// <summary>读档最前置补丁（Priority 800）：恢复存档角色，并在非联机会话下按当前单机存档与 sidecar 准备世界状态。</summary>
     [HarmonyPatch(typeof(PreRunScript), "LoadRun")]
-    [HarmonyPriority(Priority.First)]
     internal static class ContinueGameLoadPatch
     {
         private static readonly FieldInfo StartedLoadingField = AccessTools.Field(typeof(PreRunScript), "startedLoading");
@@ -33,6 +32,9 @@ namespace CasualtiesUnknown.SaveManager
             return (!string.IsNullOrEmpty(qolPath) && File.Exists(qolPath)) || SaveStore.CurrentSaveExists();
         }
 
+        // 必须标在方法而非类上以规避 0Harmony 2.9.0 Merge 静默丢弃类级优先级，确保先于其他读档前缀完成角色与单机世界准备。
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.First)]
         private static void Prefix(PreRunScript __instance)
         {
             if (ShouldDeferToVanillaGate(__instance)) return;

@@ -2,6 +2,12 @@
 
 > 中文更新日志：见 [changes.md](changes.md)
 
+## 1.3.6
+
+Fixed single-player rollbacks with this mod's own world engine (`self`) spawning the player at the top of the layer because `0Harmony 2.9.0` silently drops class-level `[HarmonyPriority]` attributes. The cleanup patch's priority fell back to `Normal`, wrapped ahead of the spawn-position restorer, and cleared the pending coordinates in its inner `finally` block before write-back ran. Moved all `[HarmonyPriority]` and `[HarmonyBefore]` attributes across the codebase onto the concrete patch methods and locked the `FinishWorldGeneration` teardown order (`SelfSpawnPatcher` at `Normal`, `MpPositionFinishPatch` at `VeryLow`, and `FinishWorldGenerationPendingFlagsCleanupPatch` exclusively at `Last` as the outermost cleanup wrapper).
+
+Reworked the in-game pause menu entry into a circular pixel button styled to blend with the vanilla pause dial. While paused (ESC), the button supports right-dragging (or Alt+dragging) around the dial, scrolling over it to resize, and automatic overlap avoidance with crowd scaling alongside dial buttons from sibling mods. Added a "Pause Dial Button" section in Settings to adjust angle, orbit radius offset, and scale, or reset to defaults.
+
 ## 1.3.5
 
 Moved the save slot directory out of the plugin folder to `Application.persistentDataPath/CuSaveManager/slots` so updating or reinstalling the mod no longer wipes backups. Existing slots and sidecar files from the legacy folder are migrated losslessly on startup, and flat legacy slots are archived by last-modified date. Slot writes and save restores now use same-directory temp files with `File.Replace` for atomic writes. Automatic pre-overwrite backups (capped at the 10 most recent) now also cover manual rollback, `mp_save` deletion when starting a new run, and vanilla `save.sv` overwrites, and the Saves tab adds a counter and cleanup button for stale auto-backups from older runs.

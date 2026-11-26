@@ -359,9 +359,13 @@ namespace CasualtiesUnknown.SaveManager
     }
 
     [HarmonyPatch(typeof(WorldGeneration), "FinishWorldGeneration")]
-    [HarmonyPriority(Priority.Last)]
     internal static class MpPositionFinishPatch
     {
+        // 标在方法而非类上以规避 0Harmony 2.9.0 Merge 丢弃类级优先级；
+        // 采用 Priority.VeryLow (100) 让 FinishWorldGenerationPendingFlagsCleanupPatch 独占 Priority.Last (0) 作为最外层清零，
+        // 同时仍晚于默认 Normal (400) 的常规补丁包装并触发多人位置还原。
+        [HarmonyPostfix]
+        [HarmonyPriority(Priority.VeryLow)]
         internal static void Postfix(ref IEnumerator __result)
         {
             if (__result == null)

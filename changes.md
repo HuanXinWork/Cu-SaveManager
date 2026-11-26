@@ -2,6 +2,12 @@
 
 > English changelog: see [changes.en.md](changes.en.md)
 
+## 1.3.6
+
+修复 `0Harmony 2.9.0` 丢弃类级 `[HarmonyPriority]` 导致的单机自研引擎（`self`）回档位置失效、玩家出生在层顶的问题。原清理补丁的优先级标在类上，运行时静默退化为 `Normal`，先于坐标写回补丁包装并在内层 `finally` 提前清零了待恢复坐标。现将全仓 `[HarmonyPriority]` 与 `[HarmonyBefore]` 统一下移至具体 Patch 方法，并锁定 `FinishWorldGeneration` 上补丁的收尾顺序（`SelfSpawnPatcher` 保持 `Normal`，`MpPositionFinishPatch` 设为 `VeryLow`，`FinishWorldGenerationPendingFlagsCleanupPatch` 独占 `Last` 在最外层兜底清零）。
+
+将局内暂停菜单入口改造为融入原版风格的环形表盘圆形像素按钮。在暂停界面（ESC）下支持直接右键（或 Alt+左键）沿表盘拖动换位、悬停滚轮缩放，并支持与同系列模组的表盘按钮自动避让排布与拥挤缩放；设置页新增「暂停表盘按钮」区段，可微调角度、轨道间距、大小或一键恢复默认。
+
 ## 1.3.5
 
 存档槽位目录从插件目录迁至 `Application.persistentDataPath/CuSaveManager/slots`，更新或重装模组不再误删备份；启动时自动无损迁移旧目录槽位与伴生文件，并将平铺旧槽按修改日期归档。写入槽位与还原存档改用同目录临时文件加 `File.Replace` 原子替换；手动回档、开新局删除 `mp_save` 及覆盖原版 `save.sv` 前自动留存备份（覆盖前备份最多保留最近 10 份），存档页新增旧局自动备份统计与清理入口。

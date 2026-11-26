@@ -98,14 +98,22 @@ namespace CasualtiesUnknown.SaveManager
 
     /// <summary>在世界生成收尾与新开局时兜底复位未消费的读档一次性标志，防止高楼层或中止读档残留污染后续局。</summary>
     [HarmonyPatch(typeof(WorldGeneration), "FinishWorldGeneration")]
-    [HarmonyPriority(Priority.Last)]
     internal static class FinishWorldGenerationPendingFlagsCleanupPatch
     {
-        // Priority.Last 确保本包装位于 SelfSpawnPatcher 外层，待内层完成坐标写回后再执行 finally 兜底清零。
+        // 必须标在方法而非类上：0Harmony 2.9.0 的 HarmonyMethodExtensions.Merge 在方法未标优先级时
+        // （detail.priority == -1）会直接跳过赋值，导致类级 [HarmonyPriority] 静默退化为 Normal (400)，
+        // 进而在元数据顺序靠前时先于 SelfSpawnPatcher 包装并在内层 finally 中提前清零 SpawnPosition。
+        // 独占 Priority.Last (0) 确保本包装处于 SelfSpawnPatcher (Normal) 与 MpPositionFinishPatch (VeryLow) 最外层。
+        [HarmonyPostfix]
+        [HarmonyPriority(Priority.Last)]
         private static void Postfix(ref IEnumerator __result)
         {
-            if (__result != null)
-                __result = Wrap(__result);
+            if (__result == null)
+            {
+                PendingLoadContext.ClearAll();
+                return;
+            }
+            __result = Wrap(__result);
         }
 
         private static IEnumerator Wrap(IEnumerator inner)
@@ -127,9 +135,11 @@ namespace CasualtiesUnknown.SaveManager
 
     /// <summary>新开局入口兜底清理读档遗留的一次性救生舱、词条与坐标还原标志。</summary>
     [HarmonyPatch(typeof(PreRunScript), "StartRun")]
-    [HarmonyPriority(Priority.First)]
     internal static class StartRunPendingFlagsCleanupPatch
     {
+        // 必须标在方法而非类上以规避 0Harmony 2.9.0 Merge 丢弃类级优先级，确保先于其他 StartRun 前置补丁清空残留读档标志。
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.First)]
         private static void Prefix()
         {
             PendingLoadContext.ClearAll();

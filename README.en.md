@@ -1,4 +1,4 @@
-# CuSaveManager V1.3.5 for Casualties: Unknown
+# CuSaveManager V1.3.6 for Casualties: Unknown
 
 > Multi-save, death rollback, and deterministic world mod for Casualties: Unknown
 > Compatible with: Casualties: Together multiplayer (5.5.x), QoL Unknown (their absence does not break core features)
@@ -26,7 +26,7 @@ Place the `CuSaveManager` folder under `BepInEx/plugins/`, containing:
 
 On first launch, default language packs `en.json` and `zh.json` are generated in `BepInEx/plugins/CuSaveManagerLocales/`; existing packs are never overwritten.
 
-After launch, a "Save Manager" button is injected on the main menu; in-game you can open the panel via that button or a hotkey.
+After launch, a "Save Manager" button is injected on the main menu. While paused in-game (ESC), a circular pixel button appears on the outer ring of the vanilla pause dial (right-drag or Alt+drag to move, scroll over it to resize, with automatic overlap avoidance alongside sibling mod dial buttons); click it or press a hotkey to open the panel.
 
 ### Panel
 
@@ -34,7 +34,7 @@ The panel has four tabs:
 
 | Tab | Purpose |
 |------|---------|
-| Settings | Auto-backup interval/count, death rollback, world engine and seed, position mode, hotkeys, misc |
+| Settings | Auto-backup interval/count, death rollback, world engine and seed, position mode, hotkeys, pause dial button, misc |
 | Saves | Browse all slots (grouped by run/date), manual save, load, delete |
 | Rollback | View recent slots and roll back now; the death-rollback countdown is also cancelled here |
 | About | Version, repo, author, dependencies |

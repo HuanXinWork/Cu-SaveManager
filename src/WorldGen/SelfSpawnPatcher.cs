@@ -22,6 +22,10 @@ namespace CasualtiesUnknown.SaveManager
             "thornbackyoung", "wallbiter"
         };
 
+        // 显式锁定 Priority.Normal (400) 并与 FinishWorldGenerationPendingFlagsCleanupPatch (Priority.Last) 约定内外层嵌套：
+        // 本 Postfix 先执行并包在内层，保证 CompletionEnumerator 回调消费 PendingLoadContext.SpawnPosition 时外层 finally 尚未清零。
+        [HarmonyPostfix]
+        [HarmonyPriority(Priority.Normal)]
         private static void Postfix(ref IEnumerator __result)
         {
             if (__result == null)
