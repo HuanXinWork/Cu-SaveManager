@@ -2,6 +2,12 @@
 
 > 中文更新日志：见 [changes.md](changes.md)
 
+## 1.3.7
+
+Added singleplayer in-game pause menu quit button replacement (enabled by default): replaces the bottom-left vanilla Give Up button with a door-shaped "Save & Exit" button that saves progress and returns to the main menu on a single click. Tutorial scenes, debug scenes, and multiplayer sessions (both host and client) automatically keep the vanilla behavior without interfering with Together. Added the "Exit to main menu only without saving" sub-option under Settings → Pause Dial Button (disabled by default): when enabled, the door button turns warning red and requires two clicks to prevent accidental exits, cancelling automatically if you move the cursor away or press ESC to close the pause menu. Also added re-entrancy guards to the exit flow.
+
+Fixed the "Continue" button staying greyed out on the main menu and in the `QoL Unknown` save popup after loading a slot: restoring `save.sv` now refreshes the main menu character info, the vanilla continue button, and the `ContinueVanilla` state inside the `QoL` popup, and opening the `QoL` popup now syncs button interactability, layer icon, and run time in real time.
+
 ## 1.3.6
 
 Fixed single-player rollbacks with this mod's own world engine (`self`) spawning the player at the top of the layer because `0Harmony 2.9.0` silently drops class-level `[HarmonyPriority]` attributes. The cleanup patch's priority fell back to `Normal`, wrapped ahead of the spawn-position restorer, and cleared the pending coordinates in its inner `finally` block before write-back ran. Moved all `[HarmonyPriority]` and `[HarmonyBefore]` attributes across the codebase onto the concrete patch methods and locked the `FinishWorldGeneration` teardown order (`SelfSpawnPatcher` at `Normal`, `MpPositionFinishPatch` at `VeryLow`, and `FinishWorldGenerationPendingFlagsCleanupPatch` exclusively at `Last` as the outermost cleanup wrapper).

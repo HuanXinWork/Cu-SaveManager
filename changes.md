@@ -2,6 +2,12 @@
 
 > English changelog: see [changes.en.md](changes.en.md)
 
+## 1.3.7
+
+新增单机局内暂停菜单退出按钮替换（默认开启）：将左下角原版放弃按钮替换为门形「存档并退出」按钮，单点保存当前进度并返回主菜单；教程关、调试关与联机模式（房主与客户端）自动保持原版行为，不干扰 Together。设置页「暂停表盘按钮」区段新增「只退出到主菜单，不保存进度」子选项（默认关闭），开启后门按钮呈警示红并需点击两次确认以防误触，移开鼠标或按 ESC 关闭暂停菜单会自动取消；同时加入退出防重入保护，避免连点重复触发。
+
+修复主菜单与 `QoL Unknown` 存档弹窗中「继续探险」按钮置灰不刷新的问题：读取存档槽恢复 `save.sv` 后同步刷新主菜单角色信息、原版继续按钮以及 `QoL` 弹窗内的 `ContinueVanilla` 状态，并在每次打开 `QoL` 弹窗时实时同步按钮可点击状态、层图标与运行时间。
+
 ## 1.3.6
 
 修复 `0Harmony 2.9.0` 丢弃类级 `[HarmonyPriority]` 导致的单机自研引擎（`self`）回档位置失效、玩家出生在层顶的问题。原清理补丁的优先级标在类上，运行时静默退化为 `Normal`，先于坐标写回补丁包装并在内层 `finally` 提前清零了待恢复坐标。现将全仓 `[HarmonyPriority]` 与 `[HarmonyBefore]` 统一下移至具体 Patch 方法，并锁定 `FinishWorldGeneration` 上补丁的收尾顺序（`SelfSpawnPatcher` 保持 `Normal`，`MpPositionFinishPatch` 设为 `VeryLow`，`FinishWorldGenerationPendingFlagsCleanupPatch` 独占 `Last` 在最外层兜底清零）。

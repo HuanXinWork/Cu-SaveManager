@@ -48,6 +48,8 @@ namespace CasualtiesUnknown.SaveManager
         internal ConfigEntry<bool> SuppressIntroLifepodOnLoad { get; }
         internal ConfigEntry<string> PreferredLanguage { get; }
         internal ConfigEntry<int> UiScalePercent { get; }
+        internal ConfigEntry<bool> ReplacePauseQuitWithSaveExit { get; }
+        internal ConfigEntry<bool> PauseQuitExitWithoutSave { get; }
         internal ConfigEntry<bool> PauseDialAutoAvoid { get; }
         internal ConfigEntry<float> PauseDialAngleDeg { get; }
         internal ConfigEntry<float> PauseDialRadiusOffset { get; }
@@ -117,6 +119,10 @@ namespace CasualtiesUnknown.SaveManager
             UiScalePercent = config.Bind("UI", "UiScalePercent", 100,
                 new ConfigDescription("界面缩放百分比（75% ~ 150%）。",
                     new AcceptableValueRange<int>(75, 150)));
+            ReplacePauseQuitWithSaveExit = config.Bind("PauseDial", "ReplaceQuitWithSaveExit", true,
+                "将局内暂停菜单的放弃圆形按钮替换为门形退出按钮（默认点击保存进度并返回主菜单；配合 ExitWithoutSave 可改为只退出不存档；教程/调试关与联机模式（房主与客户端）自动保持原版）。");
+            PauseQuitExitWithoutSave = config.Bind("PauseDial", "ExitWithoutSave", false,
+                "ReplaceQuitWithSaveExit 的子选项：开启后点击暂停菜单门形退出按钮直接返回主菜单，不保存当前进度也不改写侧车文件（仅单机且开启替换按钮时生效；教程/调试关与联机模式自动保持原版）。");
             PauseDialAutoAvoid = config.Bind("PauseDial", "AutoAvoidOverlap", true,
                 "暂停表盘按钮是否自动避让原版按钮与其他模组面板，并在空间拥挤时自适应缩小。");
             PauseDialAngleDeg = config.Bind("PauseDial", "AngleDegrees", -159f,

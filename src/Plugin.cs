@@ -4,6 +4,7 @@ using BepInEx;
 using BepInEx.Logging;
 using CasualtiesUnknown.SaveManager.Interop;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace CasualtiesUnknown.SaveManager
 {
@@ -36,6 +37,7 @@ namespace CasualtiesUnknown.SaveManager
         private bool _inPanelSaveExit;
         private bool _panelSaveExitBuiltSlot;
         private bool _inGameSaveExitHook;
+        private bool _isSavingAndExiting;
 
         private static bool _quitting;
 
@@ -108,6 +110,7 @@ namespace CasualtiesUnknown.SaveManager
             ResetAutoBackupTimer();
             // 订阅 Application.quitting 而非 OnApplicationQuit，确保在插件对象销毁前先卸载 Harmony 补丁。
             Application.quitting += OnApplicationQuitting;
+            SceneManager.sceneLoaded += OnSceneLoaded;
             ModLog.Info($"{PluginName} v{PluginVersion} ready · slots→{_store.SlotsRoot} · save.sv={SaveStore.GameSavePath}");
             ModLog.Info(MultiplayerBridge.IsMultiplayerRunning() || MultiplayerBridge.IsModPresent()
                 ? I18n.T("mp.mod_detected") : I18n.T("mp.mod_not_detected"));
@@ -115,8 +118,10 @@ namespace CasualtiesUnknown.SaveManager
             LogInteropResolution();
 
             HarmonyBootstrap.PatchAllIsolated();
+            MainMenuContinueSyncPatch.TryInstallQolPatch(HarmonyBootstrap.Instance);
             MenuButtonUiInjector.Setup(_openPanelAction);
             PauseDialButtonInjector.Setup(_cfg, Config, _openPanelAction);
+            PauseQuitButtonReplacer.Setup(_cfg, SaveAndExitCurrentRun, ExitCurrentRunWithoutSave);
             MpRollbackRunner.Ensure(this);
 
             Action[] deferredPatchers =
@@ -181,13 +186,21 @@ namespace CasualtiesUnknown.SaveManager
         {
             if (_quitting) return;
             _quitting = true;
+            _isSavingAndExiting = false;
+            try { SceneManager.sceneLoaded -= OnSceneLoaded; } catch { }
             try { _rollback?.Dispose(); } catch { }
             try { HarmonyBootstrap.UnpatchAll(); } catch { }
             try { MenuButtonUiInjector.Dispose(); } catch { }
             try { PauseDialButtonInjector.Dispose(); } catch { }
+            try { PauseQuitButtonReplacer.Dispose(); } catch { }
             try { OnPanelClosed(); } catch { }
             try { BlackWhiteSkin.Dispose(); } catch { }
             try { Application.quitting -= OnApplicationQuitting; } catch { }
+        }
+
+        private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
+        {
+            _isSavingAndExiting = false;
         }
 
         private void Update()
@@ -355,22 +368,31 @@ namespace CasualtiesUnknown.SaveManager
 
         private void SaveAndExitCurrentRun()
         {
+            // 防止暂停菜单门图标或面板按钮快速连点导致重复写槽或多次触发 SaveAndExit。
+            if (_isSavingAndExiting) return;
+            _isSavingAndExiting = true;
+            bool exitTriggered = false;
             try
             {
                 bool mpRunning = MultiplayerBridge.IsMultiplayerRunning();
                 if (mpRunning && !MultiplayerBridge.IsServer())
                 {
-                    SetMessage(I18n.T("mp.client_cannot_save"));
+                    NotifySaveExitFailure(I18n.T("mp.client_cannot_save"));
+                    return;
+                }
+                if (PlayerCameraToMainMenuGuard.ShouldBlock())
+                {
+                    NotifySaveExitFailure(I18n.T("msg.rollback_already_active"));
                     return;
                 }
                 if (!HasValidLivePlayerForSave(mpRunning && MultiplayerBridge.IsDedicatedServer()))
                 {
-                    SetMessage(I18n.T("msg.save_exit_unavailable"));
+                    NotifySaveExitFailure(I18n.T("msg.save_exit_unavailable"));
                     return;
                 }
                 if (!GameSaveBridge.CanSnapshotCurrentLayer())
                 {
-                    SetMessage(I18n.T("msg.save_layer_transition"));
+                    NotifySaveExitFailure(I18n.T("msg.save_layer_transition"));
                     return;
                 }
 
@@ -378,12 +400,18 @@ namespace CasualtiesUnknown.SaveManager
                 {
                     if (!MultiplayerBridge.TrySaveMpGame())
                     {
-                        SetMessage(I18n.T("msg.save_exit_unavailable"));
+                        NotifySaveExitFailure(I18n.T("msg.save_exit_unavailable"));
                         return;
                     }
                     _store.SaveManual(I18n.T("lbl.save_exit_alias"));
                     _window.ClosePanel();
-                    PlayerCamera.main?.ToMainMenu();
+                    RestorePauseAndTimeScaleBeforeMainMenu();
+                    PlayerCamera mpCam = PlayerCamera.main;
+                    if (mpCam != null)
+                    {
+                        mpCam.ToMainMenu();
+                        exitTriggered = true;
+                    }
                     SetMessage(I18n.T("msg.save_exit_mp_done"));
                     return;
                 }
@@ -391,12 +419,19 @@ namespace CasualtiesUnknown.SaveManager
                 // 单机处于层底时转发原生 WorldGeneration.SaveAndExit，完整触发层底结算与 QoL BypassDepthFix。
                 if (SaveStore.IsPlayerAtLayerBoundary())
                 {
+                    if (WorldGeneration.world == null)
+                    {
+                        NotifySaveExitFailure(I18n.T("msg.save_exit_unavailable"));
+                        return;
+                    }
                     _window.ClosePanel();
+                    RestorePauseAndTimeScaleBeforeMainMenu();
                     _inPanelSaveExit = true;
                     _panelSaveExitBuiltSlot = false;
                     try
                     {
                         WorldGeneration.world.SaveAndExit();
+                        exitTriggered = true;
                         if (!_panelSaveExitBuiltSlot && SaveStore.CurrentSaveExists())
                         {
                             _store.SaveManual(I18n.T("lbl.save_exit_alias"));
@@ -414,7 +449,7 @@ namespace CasualtiesUnknown.SaveManager
 
                 if (!GameSaveBridge.TrySaveGame())
                 {
-                    SetMessage(I18n.T("msg.save_exit_unavailable"));
+                    NotifySaveExitFailure(I18n.T("msg.save_exit_unavailable"));
                     return;
                 }
 
@@ -422,14 +457,99 @@ namespace CasualtiesUnknown.SaveManager
                 _store.SaveManual(I18n.T("lbl.save_exit_alias"));
                 ModLog.Flow("UI", "22", "保存并退出：槽位已写入，回主菜单");
                 _window.ClosePanel();
-                PlayerCamera.main?.ToMainMenu();
+                RestorePauseAndTimeScaleBeforeMainMenu();
+                PlayerCamera spCam = PlayerCamera.main;
+                if (spCam != null)
+                {
+                    spCam.ToMainMenu();
+                    exitTriggered = true;
+                }
                 SetMessage(I18n.T("msg.save_exit_done"));
             }
             catch (Exception ex)
             {
-                SetMessage(I18n.F("fmt.save_exit_failed", ex.Message));
+                NotifySaveExitFailure(I18n.F("fmt.save_exit_failed", ex.Message));
                 ModLog.Warning(ex.ToString());
             }
+            finally
+            {
+                if (!exitTriggered)
+                {
+                    _isSavingAndExiting = false;
+                }
+            }
+        }
+
+        /// <summary>直接退回主菜单而不执行任何存档或 sidecar 写盘，不受角色存活状态限制。</summary>
+        private void ExitCurrentRunWithoutSave()
+        {
+            if (_isSavingAndExiting) return;
+            _isSavingAndExiting = true;
+            bool exitTriggered = false;
+            try
+            {
+                PlayerCamera cam = PlayerCamera.main;
+                if (cam == null)
+                {
+                    NotifySaveExitFailure(I18n.T("msg.exit_without_save_unavailable"));
+                    return;
+                }
+                if (PlayerCameraToMainMenuGuard.ShouldBlock())
+                {
+                    NotifySaveExitFailure(I18n.T("msg.rollback_already_active"));
+                    return;
+                }
+
+                _window?.ClosePanel();
+                RestorePauseAndTimeScaleBeforeMainMenu();
+
+                // 跳过退回主菜单时的 sidecar 坐标持久化，但保留会话缓存清理。
+                ToMainMenuPersistPositionPatch.SuppressPersistOnExit = true;
+                try
+                {
+                    cam.ToMainMenu();
+                    exitTriggered = true;
+                }
+                finally
+                {
+                    ToMainMenuPersistPositionPatch.SuppressPersistOnExit = false;
+                }
+
+                SetMessage(I18n.T("msg.exit_without_save_done"));
+            }
+            catch (Exception ex)
+            {
+                NotifySaveExitFailure(I18n.F("fmt.exit_without_save_failed", ex.Message));
+                ModLog.Warning(ex.ToString());
+            }
+            finally
+            {
+                if (!exitTriggered)
+                {
+                    _isSavingAndExiting = false;
+                }
+            }
+        }
+
+        private void NotifySaveExitFailure(string msg)
+        {
+            SetMessage(msg);
+            // 从暂停菜单门按钮直接触发且模组面板未打开时，经游戏内原版横幅提示失败原因。
+            if (_window == null || !_window.Open)
+            {
+                try { PlayerCamera.main?.DoAlert(msg, important: true); }
+                catch (Exception ex) { ModLog.Debug($"暂停菜单退出失败提示显示异常：{ex.Message}"); }
+            }
+        }
+
+        private static void RestorePauseAndTimeScaleBeforeMainMenu()
+        {
+            // 切回主菜单前解除暂停态并恢复时间缩放，避免主菜单协程或界面动画残留暂停或 0 倍速。
+            if (PauseHandler.main != null && PauseHandler.main.isPaused)
+            {
+                PauseHandler.main.isPaused = false;
+            }
+            Time.timeScale = 1f;
         }
 
         /// <summary>原生 WorldGeneration.SaveAndExit 执行前抓拍实时种子与上下文，防止 ToMainMenu 先一步清零。</summary>
@@ -496,6 +616,10 @@ namespace CasualtiesUnknown.SaveManager
                 ModLog.Flow("UI", "01", "切换槽位 " + slot.FullSlotPath + " sidecar=" + slot.Sidecar.Describe()
                     + " mpRunning=" + MultiplayerBridge.IsMultiplayerRunning());
                 _store.RestoreSlotToSave(slot.FullSlotPath, _cfg.BackupBeforeOverwrite.Value);
+                if (PreRunScript.instance != null)
+                {
+                    MainMenuContinueSyncPatch.RefreshMainMenuContinueState();
+                }
                 _window?.InvalidateSlotCache();
                 ModLog.Flow("UI", "02", "切换槽位完成 " + slot.File.Name);
                 SetMessage(I18n.F("fmt.restored_to", slot.File.Name));

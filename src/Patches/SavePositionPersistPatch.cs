@@ -24,6 +24,9 @@ namespace CasualtiesUnknown.SaveManager
     [HarmonyPatch(typeof(PlayerCamera), "ToMainMenu")]
     internal static class ToMainMenuPersistPositionPatch
     {
+        /// <summary>由「只退出不存档」路径在调用 ToMainMenu 期间置位，跳过本次 sidecar 坐标写盘，但保留会话缓存清理。</summary>
+        internal static bool SuppressPersistOnExit;
+
         [HarmonyPrefix]
         [HarmonyPriority(Priority.First)]
         [HarmonyBefore("CasualtiesMP")]
@@ -32,9 +35,10 @@ namespace CasualtiesUnknown.SaveManager
             // 多人回档阶段一退回主菜单时，已还原的 mp_save 与待恢复标志不得被旧现场覆写或清空。
             if (PlayerCameraToMainMenuGuard.ShouldBlock() || MpRollbackController.ReturningToMenu) return;
 
+            bool skipPersist = SuppressPersistOnExit;
             try
             {
-                if (ShouldPersistCurrentSave())
+                if (!skipPersist && ShouldPersistCurrentSave())
                     (Plugin.SharedStore ?? new SaveStore()).PersistCurrentSaveForContinue();
             }
             catch (Exception ex)
@@ -43,6 +47,7 @@ namespace CasualtiesUnknown.SaveManager
             }
             finally
             {
+                SuppressPersistOnExit = false;
                 // 联机客机退回主菜单时清除被动接收的服务端固定种子状态，防止污染随后开启的单机对局。
                 if (MultiplayerBridge.IsMultiplayerRunning() && !MultiplayerBridge.IsServer())
                 {

@@ -10,6 +10,39 @@ namespace CasualtiesUnknown.SaveManager
             DrawSectionHeader(I18n.T("sec.pause_dial"));
             GUILayout.BeginVertical(BlackWhiteSkin.CardStyle);
 
+            bool newReplaceQuit = DrawSwitch(
+                I18n.T("sw.pause_quit_replace_save_exit"),
+                _cfg.ReplacePauseQuitWithSaveExit.Value);
+            if (newReplaceQuit != _cfg.ReplacePauseQuitWithSaveExit.Value)
+            {
+                _cfg.ReplacePauseQuitWithSaveExit.Value = newReplaceQuit;
+            }
+
+            bool newExitWithoutSave = DrawSwitch(
+                I18n.T("sw.pause_quit_exit_without_save"),
+                _cfg.PauseQuitExitWithoutSave.Value,
+                indent: 20f,
+                enabled: _cfg.ReplacePauseQuitWithSaveExit.Value);
+            if (newExitWithoutSave != _cfg.PauseQuitExitWithoutSave.Value)
+            {
+                _cfg.PauseQuitExitWithoutSave.Value = newExitWithoutSave;
+            }
+
+            if (_cfg.ReplacePauseQuitWithSaveExit.Value && _cfg.PauseQuitExitWithoutSave.Value)
+            {
+                GUILayout.BeginHorizontal();
+                GUILayout.Space(20f);
+                Color prevContentColor = GUI.contentColor;
+                GUI.contentColor = new Color(1f, 0.48f, 0.42f, 1f);
+                GUILayout.Label(
+                    I18n.T("hint.pause_quit_exit_without_save_warn"),
+                    BlackWhiteSkin.MutedLabelStyle,
+                    GUILayout.ExpandWidth(true));
+                GUI.contentColor = prevContentColor;
+                GUILayout.EndHorizontal();
+                GUILayout.Space(4f);
+            }
+
             bool newAutoAvoid = DrawSwitch(I18n.T("sw.pause_dial_auto_avoid"), _cfg.PauseDialAutoAvoid.Value);
             if (newAutoAvoid != _cfg.PauseDialAutoAvoid.Value)
             {

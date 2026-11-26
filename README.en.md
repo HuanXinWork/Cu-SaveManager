@@ -1,4 +1,4 @@
-# CuSaveManager V1.3.6 for Casualties: Unknown
+# CuSaveManager V1.3.7 for Casualties: Unknown
 
 > Multi-save, death rollback, and deterministic world mod for Casualties: Unknown
 > Compatible with: Casualties: Together multiplayer (5.5.x), QoL Unknown (their absence does not break core features)
@@ -52,6 +52,10 @@ Rolling back within the same run reproduces the terrain; a new layer is generate
 ### Death rollback
 
 Once enabled under Settings → Auto Rollback on Death, dying starts a countdown and rolls back to the latest auto/manual backup; cancel it on the Rollback tab during the countdown. In multiplayer, the host triggers it by the configured dead-player threshold.
+
+### Pause menu quit button
+
+In standard singleplayer runs, the vanilla Give Up button on the pause dial is replaced with a white exit door button by default, saving progress and returning to the main menu on a single click. Under Settings → Pause Dial Button, you can turn off the replacement or enable the sub-option "Exit to main menu only without saving": the door button turns warning red and requires two clicks to confirm (the first click arms it in bright red; moving the cursor away or closing the pause menu cancels) to prevent accidental exits. Tutorial scenes, debug scenes, and multiplayer sessions (both host and client) automatically keep the vanilla behavior.
 
 ### Misc
 

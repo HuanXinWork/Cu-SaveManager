@@ -45,6 +45,7 @@ namespace CasualtiesUnknown.SaveManager
         {
             Harmony harmony = Instance;
             TryPatchCoreDeferred(harmony);
+            MainMenuContinueSyncPatch.TryInstallQolPatch(harmony);
             MpWorldSeedInjector.TryPatch();
             MpSeedBroadcast.TryPatch();
         }
@@ -79,6 +80,7 @@ namespace CasualtiesUnknown.SaveManager
             MpWorldSeedInjector.ResetPatchState();
             QolSpawnSuppressor.ResetPatchState();
             QolTrapClearGuard.ResetPatchState();
+            MainMenuContinueSyncPatch.ResetPatchState();
         }
     }
 }

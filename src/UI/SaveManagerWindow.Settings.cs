@@ -432,7 +432,7 @@ namespace CasualtiesUnknown.SaveManager
             if (!lastField) GUILayout.Space(6f);
         }
 
-        private static bool DrawSwitch(string label, bool value)
+        private static bool DrawSwitch(string label, bool value, float indent = 0f, bool enabled = true)
         {
             string onText = CleanSwitchGlyphs(I18n.T("sw.on"));
             string offText = CleanSwitchGlyphs(I18n.T("sw.off"));
@@ -441,8 +441,13 @@ namespace CasualtiesUnknown.SaveManager
                 BlackWhiteSkin.CalcWidth(BlackWhiteSkin.SegmentStyle, offText, 80f, 8f));
             float totalW = halfW * 2f + SwitchGap;
 
+            bool prevEnabled = GUI.enabled;
+            GUI.enabled = prevEnabled && enabled;
+
             GUILayout.BeginHorizontal();
-            GUILayout.Label(label, BlackWhiteSkin.RowLabelStyle, GUILayout.ExpandWidth(true), GUILayout.MinHeight(SwitchRowMinHeight));
+            if (indent > 0f) GUILayout.Space(indent);
+            GUIStyle labelStyle = enabled ? BlackWhiteSkin.RowLabelStyle : BlackWhiteSkin.MutedLabelStyle;
+            GUILayout.Label(label, labelStyle, GUILayout.ExpandWidth(true), GUILayout.MinHeight(SwitchRowMinHeight));
             GUILayout.Space(16f);
 
             Rect slot = GUILayoutUtility.GetRect(totalW, SwitchRowMinHeight,
@@ -464,8 +469,9 @@ namespace CasualtiesUnknown.SaveManager
             }
 
             GUILayout.EndHorizontal();
+            GUI.enabled = prevEnabled;
             GUILayout.Space(6f);
-            return result;
+            return enabled ? result : value;
         }
 
         private static string CleanSwitchGlyphs(string raw)
@@ -522,6 +528,7 @@ namespace CasualtiesUnknown.SaveManager
                             InvalidateSlotCache();
                             MenuButtonUiInjector.RefreshButtonText();
                             PauseDialButtonInjector.RefreshTooltipText();
+                            PauseQuitButtonReplacer.RefreshCurrent();
                             GUIUtility.ExitGUI();
                         }
                     }
